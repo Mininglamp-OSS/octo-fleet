@@ -49,6 +49,7 @@ type botModel struct {
 const botSelectColumns = "id, space_id, owner_uid, runtime_id, runtime_kind, daemon_id, name, bot_uid, bot_token, workspace_id, status, claim_token, error_msg, created_by, created_at, updated_at"
 
 const (
+	botStatusDraft        = "draft"
 	botStatusProvisioning = "provisioning"
 	botStatusBotMinted    = "bot_minted"
 	botStatusDispatched   = "dispatched"
@@ -301,7 +302,7 @@ func (rt *Runtime) createBot(c *wkhttp.Context) {
 		RuntimeKind: req.RuntimeKind,
 		DaemonID:    runtime.DaemonID,
 		Name:        name,
-		Status:      botStatusProvisioning,
+		Status:      botStatusDraft,
 	}
 	if req.RuntimeKind == runtimeKindOpenclaw {
 		row.WorkspaceID = deriveWorkspaceID(name)
@@ -316,14 +317,85 @@ func (rt *Runtime) createBot(c *wkhttp.Context) {
 	row.Id = id
 
 	// FLEET MIGRATION: minting now happens out-of-band — the web client
-	// is expected to POST octo-server /v1/bot/mint, receive {bot_uid,
-	// bot_token}, then PATCH /v1/runtimes/bots/:id/mint here to set
-	// the credentials and trigger bot.provision. Until that flow lands
-	// (PR-A.2), bot creation through this endpoint is incomplete and
-	// stays in `provisioning` status with no daemon dispatch.
-	_ = generateBotToken // ensure helper stays referenced; PR-A.2 will reuse it
+	// is expected to POST octo-server /v1/bot/mint, receive {bot_uid},
+	// then PATCH /v1/runtimes/bots/:id/mint here to set the credentials
+	// and trigger bot.provision. This row stays in `draft` status until
+	// that patch arrives.
+	_ = generateBotToken // helper retained for legacy callers
 	row.CreatedAt = db.Time(time.Now())
 	row.UpdatedAt = row.CreatedAt
+	c.Response(toBotResp(row))
+}
+
+// patchBotMintReq is the body of PATCH /v1/runtimes/bots/:id/mint.
+// Web supplies bot_uid (from server) — bot_token is fetched by daemon
+// directly from server, NOT passed through here, so fleet never stores
+// the token.
+type patchBotMintReq struct {
+	BotUID string `json:"bot_uid"`
+}
+
+// PATCH /v1/runtimes/bots/:id/mint
+//
+// Web caller flow:
+//   1. POST /v1/runtimes/bots       → fleet inserts draft row, returns id
+//   2. POST /v1/bot/mint (server)   → server mints IM bot, returns bot_uid
+//   3. PATCH /v1/runtimes/bots/:id/mint {bot_uid} → fleet promotes row
+//      to bot_minted (openclaw) or active (inert), queues bot.provision
+//      for the daemon to claim on its next heartbeat.
+//
+// bot_token is NEVER written to fleet — it remains on octo-server and the
+// daemon fetches it via GET /v1/bot/:uid/token using its daemon-scope JWT.
+func (rt *Runtime) patchBotMint(c *wkhttp.Context) {
+	idStr := c.Param("id")
+	id, perr := strconv.ParseInt(idStr, 10, 64)
+	if perr != nil || id <= 0 {
+		c.ResponseError(errors.New("invalid id"))
+		return
+	}
+	loginUID := c.GetLoginUID()
+
+	var req patchBotMintReq
+	if err := c.BindJSON(&req); err != nil {
+		c.ResponseError(fmt.Errorf("invalid body: %w", err))
+		return
+	}
+	if strings.TrimSpace(req.BotUID) == "" {
+		c.ResponseError(errors.New("bot_uid required"))
+		return
+	}
+
+	row, err := rt.db.queryBotByID(id)
+	if err != nil || row == nil {
+		c.ResponseErrorWithStatus(errors.New("bot not found"), http.StatusNotFound)
+		return
+	}
+	if row.OwnerUID != loginUID {
+		c.ResponseErrorWithStatus(errors.New("no permission"), http.StatusForbidden)
+		return
+	}
+	if row.Status != botStatusDraft {
+		c.ResponseError(fmt.Errorf("bot is in %s state, cannot mint", row.Status))
+		return
+	}
+
+	// openclaw bots need daemon provisioning; others go straight to
+	// active (inert — non-openclaw paths are not yet implemented).
+	nextStatus := botStatusActive
+	if row.RuntimeKind == runtimeKindOpenclaw {
+		nextStatus = botStatusBotMinted
+	}
+	if _, err := rt.db.session.UpdateBySql(
+		`UPDATE bot SET bot_uid=?, status=? WHERE id=?`,
+		req.BotUID, nextStatus, id,
+	).Exec(); err != nil {
+		rt.Error("patchBotMint update", zap.Error(err), zap.Int64("id", id))
+		c.ResponseError(errors.New("update failed"))
+		return
+	}
+	row.BotUID = req.BotUID
+	row.Status = nextStatus
+	row.UpdatedAt = db.Time(time.Now())
 	c.Response(toBotResp(row))
 }
 

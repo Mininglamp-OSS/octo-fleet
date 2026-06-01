@@ -70,6 +70,9 @@ func (rt *Runtime) Route(r *wkhttp.WKHttp) {
 		authGroup.POST("/runtimes/upgrade", rt.upgradeInit)
 		authGroup.GET("/runtimes/upgrade/:task_id", rt.upgradeGet)
 		authGroup.POST("/runtimes/bots", rt.createBot)
+		// POST not PATCH because wkhttp RouterGroup wraps GET/POST/PUT/DELETE
+		// but skips PATCH. /mint sub-path keeps the semantic intent.
+		authGroup.POST("/runtimes/bots/:id/mint", rt.patchBotMint)
 		authGroup.GET("/runtimes/bots", rt.listBots)
 		authGroup.GET("/runtimes/bots/:id", rt.getBot)
 		authGroup.DELETE("/runtimes/bots/:id", rt.archiveBot)
