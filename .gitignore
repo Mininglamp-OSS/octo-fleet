@@ -1,0 +1,5 @@
+bin/
+fleetdata/
+logs/
+*.log
+.DS_Store

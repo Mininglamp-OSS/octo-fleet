@@ -1,0 +1,29 @@
+# octo-fleet config — minimal subset of octo-server's tsdd.yaml.
+# Only runtime/bot orchestration needs apply.
+
+mode: "debug"
+addr: ":8092"
+appName: "octo-fleet"
+rootDir: "fleetdata"
+
+db:
+  # fleet uses its own database schema (octo_fleet) on the shared MySQL.
+  # This isolates fleet schema migrations from server's, since both moduls
+  # currently embed their own *.sql files.
+  mysqlAddr: "root:demo@tcp(127.0.0.1:3306)/octo_fleet?charset=utf8mb4&parseTime=true"
+  redisAddr: "127.0.0.1:6379"
+  redisPass: ""
+
+external:
+  ip: "localhost"
+  baseURL: "http://localhost:8092"
+
+# server's public key location (jwks.json) — fleet fetches once at startup.
+# When server is local for dev, point at the server URL.
+auth:
+  serverJwksURL: "http://localhost:8090/.well-known/jwks.json"
+
+logger:
+  level: 1
+  dir: "./logs"
+  lineNum: false
