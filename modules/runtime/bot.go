@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Mininglamp-OSS/octo-fleet/internal/auth"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/db"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
 	// FLEET MIGRATION: server's botfather is unreachable from this
@@ -335,11 +336,8 @@ func (rt *Runtime) listBots(c *wkhttp.Context) {
 		return
 	}
 	loginUID := c.GetLoginUID()
-	var memberCount int
-	if err := rt.db.session.SelectBySql(
-		"SELECT COUNT(*) FROM space_member WHERE space_id=? AND uid=? AND status=1",
-		spaceID, loginUID,
-	).LoadOne(&memberCount); err != nil || memberCount == 0 {
+	// FLEET MIGRATION: trust JWT.space_id (was space_member lookup)
+	if !auth.MatchesSpace(c, spaceID) {
 		c.ResponseErrorWithStatus(errors.New("not a space member"), http.StatusForbidden)
 		return
 	}

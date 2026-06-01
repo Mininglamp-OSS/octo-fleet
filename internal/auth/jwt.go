@@ -178,6 +178,19 @@ func Middleware(requireScope string) wkhttp.HandlerFunc {
 	return defaultVerifier.Middleware(requireScope)
 }
 
+// MatchesSpace returns true when the request's JWT space_id matches the
+// passed spaceID. Replaces the old space_member-table lookup (which fleet
+// can't do — that table lives in octo-server's schema). The JWT issuer
+// validates membership at issue time, so trusting the claim is sound.
+func MatchesSpace(c *wkhttp.Context, spaceID string) bool {
+	v, ok := c.Get("space_id")
+	if !ok {
+		return false
+	}
+	tokenSpaceID, _ := v.(string)
+	return tokenSpaceID != "" && tokenSpaceID == spaceID
+}
+
 // Middleware returns a gin handler that enforces JWT auth. On success it
 // sets the canonical gin context keys ("uid", "space_id", "daemon_id",
 // "scope") so downstream handlers don't need to know about JWT.

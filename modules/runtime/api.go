@@ -306,16 +306,10 @@ func (rt *Runtime) list(c *wkhttp.Context) {
 	}
 
 	loginUID := c.GetLoginUID()
-	var memberCount int
-	if err := rt.db.session.SelectBySql(
-		"SELECT COUNT(*) FROM space_member WHERE space_id=? AND uid=? AND status=1",
-		spaceID, loginUID,
-	).LoadOne(&memberCount); err != nil {
-		rt.Error("check space membership failed", zap.Error(err))
-		c.ResponseError(errors.New("query failed"))
-		return
-	}
-	if memberCount == 0 {
+	// FLEET MIGRATION: was SELECT FROM space_member (server-only table).
+	// JWT issuer already validated membership at issue time; trust the
+	// space_id claim instead.
+	if !auth.MatchesSpace(c, spaceID) {
 		c.ResponseErrorWithStatus(errors.New("no permission to access this space"), 403)
 		return
 	}
@@ -506,12 +500,16 @@ func (rt *Runtime) pingInit(c *wkhttp.Context) {
 	}
 
 	loginUID := c.GetLoginUID()
+	// FLEET MIGRATION: trust JWT.space_id and only verify the agent_runtime
+	// exists in that space (no JOIN to space_member which fleet can't see).
+	if !auth.MatchesSpace(c, req.SpaceID) {
+		c.ResponseErrorWithStatus(errors.New("no permission to ping this device"), 403)
+		return
+	}
 	var accessCount int
 	if err := rt.db.session.SelectBySql(
-		`SELECT COUNT(*) FROM agent_runtime ar
-		 INNER JOIN space_member sm ON ar.space_id = sm.space_id COLLATE utf8mb4_general_ci AND sm.uid = ? AND sm.status = 1
-		 WHERE ar.space_id = ? AND ar.daemon_id = ?`,
-		loginUID, req.SpaceID, req.DaemonID,
+		`SELECT COUNT(*) FROM agent_runtime WHERE space_id = ? AND daemon_id = ?`,
+		req.SpaceID, req.DaemonID,
 	).LoadOne(&accessCount); err != nil {
 		rt.Error("check daemon access", zap.Error(err))
 		c.ResponseError(errors.New("query failed"))
@@ -521,6 +519,7 @@ func (rt *Runtime) pingInit(c *wkhttp.Context) {
 		c.ResponseErrorWithStatus(errors.New("no permission to ping this device"), 403)
 		return
 	}
+	_ = loginUID
 
 	pingID := fmt.Sprintf("ping_%d", time.Now().UnixNano())
 	entry := &pingEntry{
@@ -596,15 +595,12 @@ func (rt *Runtime) pingGet(c *wkhttp.Context) {
 	}
 
 	loginUID := c.GetLoginUID()
-	var memberCount int
-	_ = rt.db.session.SelectBySql(
-		`SELECT COUNT(*) FROM space_member WHERE space_id=? AND uid=? AND status=1`,
-		entry.SpaceID, loginUID,
-	).LoadOne(&memberCount)
-	if memberCount == 0 {
+	// FLEET MIGRATION: trust JWT.space_id (see auth.MatchesSpace).
+	if !auth.MatchesSpace(c, entry.SpaceID) {
 		c.ResponseErrorWithStatus(errors.New("no permission"), 403)
 		return
 	}
+	_ = loginUID
 
 	c.Response(gin.H{
 		"ping_id": entry.ID,

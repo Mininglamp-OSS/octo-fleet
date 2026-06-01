@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Mininglamp-OSS/octo-fleet/internal/auth"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -53,15 +54,12 @@ func (rt *Runtime) upgradeInit(c *wkhttp.Context) {
 		component = componentDaemon
 	}
 
-	// 1. 校验 space 成员
-	var memberCount int
-	if err := rt.db.session.SelectBySql(
-		"SELECT COUNT(*) FROM space_member WHERE space_id=? AND uid=? AND status=1",
-		req.SpaceID, loginUID,
-	).LoadOne(&memberCount); err != nil || memberCount == 0 {
+	// 1. 校验 space — FLEET MIGRATION: trust JWT.space_id.
+	if !auth.MatchesSpace(c, req.SpaceID) {
 		c.ResponseErrorWithStatus(errors.New("no permission"), 403)
 		return
 	}
+	_ = loginUID
 
 	// 2. 查 daemon
 	var daemon agentRuntimeModel

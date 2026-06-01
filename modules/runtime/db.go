@@ -258,6 +258,20 @@ func (d *runtimeDB) queryBotInfoByUIDs(spaceID string, uids []string) (map[strin
 	if len(uids) == 0 || spaceID == "" {
 		return map[string]botInfo{}, nil
 	}
+	// FLEET MIGRATION: user/robot/space_member tables live in
+	// octo-server's schema. Fleet cannot enrich names locally; the
+	// browser supplements the display name via a separate server
+	// call when needed. Return empty map so callers fall back to
+	// raw UIDs.
+	return map[string]botInfo{}, nil
+}
+
+// queryBotInfoByUIDsLegacy is kept here as reference for the original
+// implementation; not invoked from fleet.
+func (d *runtimeDB) queryBotInfoByUIDsLegacy(spaceID string, uids []string) (map[string]botInfo, error) {
+	if len(uids) == 0 || spaceID == "" {
+		return map[string]botInfo{}, nil
+	}
 	// dbr 的 IN 参数需要 []interface{}
 	args := make([]interface{}, 0, len(uids)+1)
 	args = append(args, spaceID)
