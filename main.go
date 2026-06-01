@@ -15,11 +15,12 @@ import (
 	"os"
 	"strings"
 
+	"github.com/Mininglamp-OSS/octo-fleet/internal/auth"
+	_ "github.com/Mininglamp-OSS/octo-fleet/internal"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/module"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/Mininglamp-OSS/octo-lib/server"
-	_ "github.com/Mininglamp-OSS/octo-fleet/internal"
 	"github.com/gin-gonic/gin"
 	"github.com/judwhite/go-svc"
 	"github.com/spf13/viper"
@@ -66,6 +67,16 @@ func main() {
 	logOpts.LineNum = cfg.Logger.LineNum
 	logOpts.LogDir = cfg.Logger.Dir
 	log.Configure(logOpts)
+
+	// JWT verifier singleton — viper field `auth.serverJwksURL` points
+	// at octo-server's /.well-known/jwks.json. The octo-lib Config
+	// struct exposes no public field for this so we read directly off
+	// viper (which already loaded the yaml above).
+	jwksURL := vp.GetString("auth.serverJwksURL")
+	if jwksURL == "" {
+		jwksURL = "http://localhost:8090/.well-known/jwks.json"
+	}
+	auth.Initialize(jwksURL)
 
 	// octo-fleet is API-only — no grpc, no message worker, no cron events.
 	runAPI(ctx)

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Mininglamp-OSS/octo-fleet/internal/auth"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
@@ -41,7 +42,10 @@ func New(ctx *config.Context) *Runtime {
 }
 
 func (rt *Runtime) Route(r *wkhttp.WKHttp) {
-	daemon := r.Group("/v1/daemon", rt.authAPIKey())
+	// FLEET MIGRATION: auth swapped from user_api_key lookup (server-only
+	// table) to JWT verified against octo-server's JWKS. daemon endpoints
+	// require scope=daemon, web endpoints require scope=web.
+	daemon := r.Group("/v1/daemon", auth.Middleware("daemon"))
 	{
 		daemon.POST("/register", rt.register)
 		daemon.POST("/heartbeat", rt.heartbeat)
@@ -57,22 +61,24 @@ func (rt *Runtime) Route(r *wkhttp.WKHttp) {
 		internal.POST("/bot-tasks", rt.createBotTask)
 	}
 
-	auth := r.Group("/v1", rt.ctx.AuthMiddleware(r))
+	authGroup := r.Group("/v1", auth.Middleware("web"))
 	{
-		auth.GET("/runtimes", rt.list)
-		auth.DELETE("/runtimes/:id", rt.deleteRuntime)
-		auth.POST("/runtimes/ping", rt.pingInit)
-		auth.GET("/runtimes/ping/:ping_id", rt.pingGet)
-		auth.POST("/runtimes/upgrade", rt.upgradeInit)
-		auth.GET("/runtimes/upgrade/:task_id", rt.upgradeGet)
-		auth.POST("/runtimes/bots", rt.createBot)
-		auth.GET("/runtimes/bots", rt.listBots)
-		auth.GET("/runtimes/bots/:id", rt.getBot)
-		auth.DELETE("/runtimes/bots/:id", rt.archiveBot)
-		auth.GET("/runtimes/bots/:id/feed", rt.getBotFeed)
+		authGroup.GET("/runtimes", rt.list)
+		authGroup.DELETE("/runtimes/:id", rt.deleteRuntime)
+		authGroup.POST("/runtimes/ping", rt.pingInit)
+		authGroup.GET("/runtimes/ping/:ping_id", rt.pingGet)
+		authGroup.POST("/runtimes/upgrade", rt.upgradeInit)
+		authGroup.GET("/runtimes/upgrade/:task_id", rt.upgradeGet)
+		authGroup.POST("/runtimes/bots", rt.createBot)
+		authGroup.GET("/runtimes/bots", rt.listBots)
+		authGroup.GET("/runtimes/bots/:id", rt.getBot)
+		authGroup.DELETE("/runtimes/bots/:id", rt.archiveBot)
+		authGroup.GET("/runtimes/bots/:id/feed", rt.getBotFeed)
 	}
 }
 
+// apiKeyInfo / authAPIKey are kept dead-coded here for one release of
+// reference value. They are not wired into Route(). PR-A.2 deletes them.
 type apiKeyInfo struct {
 	UID     string
 	SpaceID string
@@ -80,48 +86,11 @@ type apiKeyInfo struct {
 
 func (rt *Runtime) authAPIKey() wkhttp.HandlerFunc {
 	return func(c *wkhttp.Context) {
-		auth := c.GetHeader("Authorization")
-		if !strings.HasPrefix(auth, "Bearer ") {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"msg": "missing Authorization header"})
-			return
-		}
-		apiKey := strings.TrimPrefix(auth, "Bearer ")
-		if apiKey == "" {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"msg": "empty api key"})
-			return
-		}
-
-		var info apiKeyInfo
-		_, err := rt.db.session.Select("uid", "space_id").From("user_api_key").
-			Where("api_key=?", apiKey).
-			Load(&info)
-		if err != nil {
-			rt.Error("query user_api_key failed", zap.Error(err))
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"msg": "auth failed"})
-			return
-		}
-		if info.UID == "" {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"msg": "invalid api key"})
-			return
-		}
-
-		var memberCount int
-		if err := rt.db.session.SelectBySql(
-			"SELECT COUNT(*) FROM space_member WHERE space_id=? AND uid=? AND status=1",
-			info.SpaceID, info.UID,
-		).LoadOne(&memberCount); err != nil {
-			rt.Error("check space membership in authAPIKey failed", zap.Error(err))
-			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"msg": "auth check failed"})
-			return
-		}
-		if memberCount == 0 {
-			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"msg": "user is no longer a member of this space"})
-			return
-		}
-
-		c.Set("owner_uid", info.UID)
-		c.Set("space_id", info.SpaceID)
-		c.Next()
+		_ = strings.HasPrefix // keep imports live in dead code path
+		_ = gin.H{}
+		_ = zap.Error(nil)
+		_ = http.StatusUnauthorized
+		c.AbortWithStatusJSON(http.StatusGone, gin.H{"msg": "authAPIKey deprecated in fleet — use JWT"})
 	}
 }
 
