@@ -301,3 +301,36 @@ func (d *runtimeDB) queryBotInfoByUIDsLegacy(spaceID string, uids []string) (map
 	}
 	return result, nil
 }
+
+
+// listActiveBotsForDaemon returns bot_uid + workspace_id for every active
+// bot whose runtime is hosted by this daemon. Daemon iterates the list on
+// each heartbeat to pull tasks for each bot from matter.
+func (d *runtimeDB) listActiveBotsForDaemon(daemonID string) ([]struct {
+	BotUID      string `json:"bot_uid" db:"bot_uid"`
+	WorkspaceID string `json:"workspace_id" db:"workspace_id"`
+}, error) {
+	type row struct {
+		BotUID      string `json:"bot_uid" db:"bot_uid"`
+		WorkspaceID string `json:"workspace_id" db:"workspace_id"`
+	}
+	var rows []row
+	_, err := d.session.SelectBySql(
+		`SELECT b.bot_uid, b.workspace_id
+		   FROM bot b
+		  WHERE b.daemon_id=? AND b.status='active' AND b.bot_uid!=''`,
+		daemonID,
+	).Load(&rows)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]struct {
+		BotUID      string `json:"bot_uid" db:"bot_uid"`
+		WorkspaceID string `json:"workspace_id" db:"workspace_id"`
+	}, len(rows))
+	for i, r := range rows {
+		out[i].BotUID = r.BotUID
+		out[i].WorkspaceID = r.WorkspaceID
+	}
+	return out, nil
+}

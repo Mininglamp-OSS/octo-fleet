@@ -254,7 +254,19 @@ func (rt *Runtime) heartbeat(c *wkhttp.Context) {
 		resp["pending_command"] = rt.buildPendingBotProvision(claimedBot)
 	}
 
-	// Same pull pattern for matter-driven bot tasks.
+	// PR-B.2: managed_bots tells the daemon which bots to poll from
+	// matter on this heartbeat tick. Replaces fleet's own pending_task
+	// dispatch (still emitted below as a fallback for pre-PR-B.2
+	// daemons that don't know about managed_bots).
+	managed, mberr := rt.db.listActiveBotsForDaemon(existing.DaemonID)
+	if mberr != nil {
+		rt.Warn("listActiveBotsForDaemon failed", zap.Error(mberr), zap.String("daemon_id", existing.DaemonID))
+	} else if len(managed) > 0 {
+		resp["managed_bots"] = managed
+	}
+
+	// Same pull pattern for matter-driven bot tasks. (Pre-PR-B.2 fallback;
+	// after PR-B daemon ignores this in favor of pulling directly.)
 	claimedTask, _ := rt.db.claimPendingBotTask(existing.DaemonID)
 	if claimedTask != nil {
 		resp["pending_task"] = rt.buildPendingBotTask(claimedTask)
