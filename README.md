@@ -1,109 +1,157 @@
-# octo-fleet — runtime/bot orchestration service
+<p align="center">
+  <sub>🛟</sub>
+</p>
 
-Independent backend split out of `octo-server` per spec
-`docs/superpowers/specs/2026-06-01-octo-fleet-extraction-design.md`
-(see also `/Users/caster/octo/octo-daemon-cli/plan.md` for the
-overall cross-service plan).
+<p align="center">
+  <b>Octo Fleet — the runtime &amp; bot orchestration service for OCTO.</b><br/>
+  <sub>Manages every daemon, bot, and matter dispatch in your fleet — split out of <code>octo-server</code> so each service evolves on its own clock.</sub>
+</p>
 
-## Why this exists
+<p align="center">
+  <a href="https://github.com/Mininglamp-OSS"><b>🏠 OCTO Home</b></a> ·
+  <a href="#-quickstart"><b>🚀 Quickstart</b></a> ·
+  <a href="#-architecture"><b>🏗 Architecture</b></a> ·
+  <a href="https://github.com/Mininglamp-OSS/octo-server/blob/main/CONTRIBUTING.md"><b>🤝 Contributing</b></a>
+</p>
 
-`octo-server` was carrying both IM/user concerns *and* runtime/bot
-orchestration. The runtime side has different scaling, ownership, and
-deployment characteristics. Splitting it lets each service evolve
-independently and removes a tangle of cross-module dependencies inside
-the monolith.
+<p align="center">
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License"></a>
+  <a href="./README.zh.md"><img src="https://img.shields.io/badge/lang-简体中文-red.svg" alt="简体中文"></a>
+  <img src="https://img.shields.io/badge/go-%3E=1.25-blue.svg" alt="Go 1.25+">
+  <img src="https://img.shields.io/badge/status-PoC-orange.svg" alt="PoC">
+</p>
 
-## Service boundaries
+---
 
-The trust chain is JWT-based — `octo-server` is the only JWT issuer.
-`octo-fleet` and `octo-matter` fetch the server's public key from
-`/.well-known/jwks.json` and verify tokens locally. **No service makes
-HTTP calls to another service** — daemon and browser orchestrate.
+> 🌐 **Read in**: **English** · [简体中文](README.zh.md)
+
+# 🛟 Octo Fleet
+
+> **Runtime & bot orchestration** for the OCTO platform. Owns the `agent_runtime` registry, the `bot` table, and the daemon dispatch loop — extracted from `octo-server` so the IM monolith stops carrying agent-fleet concerns.
+
+`octo-fleet` is the small Go service that every OCTO deployment runs
+alongside [`octo-server`](https://github.com/Mininglamp-OSS/octo-server)
+and [`octo-matter`](https://github.com/Mininglamp-OSS/octo-matter). It
+holds the source of truth for which daemons are alive, which bots they
+host, and which provider runtimes (Claude Code, Codex, OpenClaw,
+Hermes) are running where.
+
+## 🌟 Why Octo Fleet
+
+- **Zero-cross-talk between backends.** `octo-server`, `octo-fleet`, and `octo-matter` make **zero** HTTP calls to each other — all trust flows through a single JWT issuer (server) verified locally via JWKS. Adding/replacing a service stays a 5-minute config change.
+- **bot_token never leaves server.** Browser only sees `bot_uid`; daemon fetches the token directly from server with its daemon-scope JWT. Fleet stores orchestration metadata only.
+- **Daemon pulls, never gets pushed.** Heartbeat returns `managed_bots` + any pending `bot.provision` command; daemon polls matter for tasks. No webhook / outbox / HMAC ceremony.
+- **Drop-in rollback path.** Cutover from `octo-server/modules/runtime` to fleet is gated by env (`LEGACY_RUNTIME_ROUTES=true` on server re-enables the old routes); fleet runs on its own MySQL schema (`octo_fleet`) so data lives apart.
+
+## 🚀 Quickstart
+
+### 1. Prerequisites
+
+- Running [`octo-server`](https://github.com/Mininglamp-OSS/octo-server) at `:8090` with the `auth_jwt` module loaded (it auto-generates a keypair on first start).
+- MySQL 8 + Redis (the same instances `octo-server` uses are fine).
+
+### 2. Create the fleet schema
+
+```bash
+mysql -uroot -p -e "CREATE DATABASE IF NOT EXISTS octo_fleet \
+  CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+```
+
+### 3. Build & run
+
+```bash
+make build
+make run     # listens on :8092 by default
+```
+
+Schema migrations apply automatically on the first start.
+
+### 4. Verify
+
+```bash
+curl http://localhost:8092/v1/ping
+# {"status":200}
+```
+
+## ⚙️ Configuration
+
+Fleet reads its config from `configs/fleet.yaml` plus the following env overrides:
+
+| Env | Purpose | Default |
+|-----|---------|---------|
+| `OCTO_MATTER_URL` | Base URL for the matter service (used by bot feed proxy) | unset → bot feed returns empty |
+| `NOTIFY_INTERNAL_TOKEN` | Shared X-Internal-Token for legacy `/v1/internal/*` callbacks | unset → those routes 401 |
+
+See `configs/fleet.yaml` for the full schema (`addr`, `db.mysqlAddr`, `db.redisAddr`, `external.baseURL`, `auth.serverJwksURL`).
+
+## 🏗 Architecture
 
 ```
-            ┌─────────────────┐
-            │  octo-server    │ ← JWT issuer (RS256)
-            │  :8090          │   + bot mint + bot_token
-            └─────────────────┘
-                    ▲
-                    │ jwks.json (pull, cached)
+              ┌────────────────────────────┐
+              │  octo-server :8090         │ ← only JWT issuer
+              │  ├─ /v1/auth/token          │
+              │  ├─ /v1/bot/mint            │
+              │  ├─ /v1/bot/:uid/token      │
+              │  └─ /.well-known/jwks.json  │
+              └────────────────────────────┘
+                    ▲ JWKS pull (cached)
                     │
-            ┌─────────────────┐
-            │  octo-fleet     │ ← this service
-            │  :8092          │   runtime / bot / bot_task CRUD
-            └─────────────────┘
-              ▲              ▲
-              │ JWT (web)    │ JWT (daemon)
-              │              │
-        ┌─────────┐    ┌──────────────┐
-        │ browser │    │  daemon-cli  │
-        └─────────┘    └──────────────┘
+              ┌─────┴────────────┬──────────────┐
+              │                  │              │
+       octo-fleet :8092    octo-matter :8080
+       ├─ runtime/bot      ├─ matter/timeline
+       ├─ heartbeat        ├─ matter_bot_task
+       └─ managed_bots     └─ daemon endpoints
+              ▲                  ▲
+              │ JWT (web)        │ JWT (daemon)
+              │                  │
+        ┌─────┴────┐       ┌─────┴────────┐
+        │ browser  │       │  daemon-cli  │
+        └──────────┘       └──────────────┘
 ```
 
-## Local dev
+The cross-service contract is documented in
+[`/Users/caster/octo/octo-daemon-cli/plan.md`](https://github.com/Mininglamp-OSS/octo-daemon-cli/blob/feat/agent-runtime/plan.md)
+and the spec at
+[`octo-web/docs/superpowers/specs/2026-06-01-octo-fleet-extraction-design.md`](https://github.com/Mininglamp-OSS/octo-web/blob/feat/agent-runtime/docs/superpowers/specs/2026-06-01-octo-fleet-extraction-design.md).
 
-```bash
-# 1. Ensure server is up at :8090 with auth_jwt module loaded
-#    (server self-generates RSA keypair to ~/.octo-server/jwt-priv.pem
-#    on first start, exposes /.well-known/jwks.json)
+## 📦 What lives where
 
-# 2. Create the fleet schema (one-time)
-docker exec testenv-mysql-1 mysql -uroot -pdemo \
-  -e "CREATE DATABASE IF NOT EXISTS octo_fleet CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+| Concern | Owner | Notes |
+|---------|-------|-------|
+| User / IM account / bot credential | `octo-server` | bot_token stays in `robot.bot_token`; daemon fetches via JWT |
+| JWT issuer + JWKS | `octo-server`, `modules/auth_jwt` | RS256, kid stable across restarts |
+| Runtime registry + bot orchestration metadata | `octo-fleet` (this repo) | own `octo_fleet` schema |
+| Matter + bot_task queue | `octo-matter` | INSERT bot_task same-tx as comment |
+| Daemon (pull tasks, run agents) | `octo-daemon-cli` | binds OCTO_FLEET_URL + OCTO_SERVER_URL + OCTO_MATTER_URL |
+| Web UI | `octo-web` | three-step bot mint orchestration in browser |
 
-# 3. Build & run
-make run
+## 🔌 HTTP API
 
-# Fleet listens on :8092. SQL migrations apply on first start.
-```
+### Daemon endpoints (JWT scope=daemon)
+- `POST /v1/daemon/register`
+- `POST /v1/daemon/heartbeat` — returns `pending_command` (bot.provision) + `managed_bots`
+- `POST /v1/daemon/deregister`
+- `POST /v1/daemon/{ping,upgrade,bots,bot-tasks}/...` ack endpoints
 
-## Daemon hookup
+### Web endpoints (JWT scope=web)
+- `GET  /v1/runtimes` — list registered runtimes in space
+- `POST /v1/runtimes/bots` — create bot (draft)
+- `POST /v1/runtimes/bots/:id/mint` — patch with server-minted `bot_uid` to start provision
+- `GET  /v1/runtimes/bots[/:id[/feed]]` — read APIs
+- `DELETE /v1/runtimes/bots/:id` — archive
 
-Set both URL env vars (back-compat: if OCTO_FLEET_URL is unset, daemon
-stays on legacy api-key + server path):
+## 🚧 PoC status
 
-```bash
-OCTO_FLEET_URL=http://127.0.0.1:8092 \
-OCTO_SERVER_URL=http://127.0.0.1:8090 \
-./octo-daemon start
-```
+This is part of the **fleet-extraction PoC** (PR-A → PR-B → PR-C). It's
+running in local dev and the full e2e is verified end-to-end. Before
+production:
 
-When `OCTO_FLEET_URL` is set, daemon:
-- Exchanges its api-key for a JWT against server `/v1/auth/token`
-- Sends JWT to fleet for all `/v1/daemon/*` calls
-- Sends JWT to server for `/v1/bot/:uid/token` lookups
-- Refreshes JWT 5min before expiry (default TTL 30 days)
+- [ ] Unit tests for `internal/auth` and bot creation flow
+- [ ] Clean up legacy `bot_task.go` (PR-B.3 deprecated the table; code retained for rollback)
+- [ ] Drop fleet → matter HTTP proxy in bot feed; have browser call matter directly
+- [ ] Wire CI lint + golangci-lint
 
-## Web hookup
+## 📜 License
 
-The browser does session → JWT exchange automatically. `vite.config.ts`
-proxies `/api/v1/runtimes/*` and `/api/v1/daemon/*` to fleet :8092; all
-other `/api/v1/*` routes still go to server :8090.
-
-`packages/dmworkbase/src/Service/APIClient.ts` injects
-`Authorization: Bearer <JWT>` on requests matching `/runtimes` or
-`/daemon` URL prefixes. JWT is fetched and cached in-memory by
-`getFleetJWT()`.
-
-## What changed in octo-server
-
-- New module `modules/auth_jwt/` contains:
-  - `POST /v1/auth/token`        — exchange session/api-key for JWT
-  - `GET  /.well-known/jwks.json` — public key for verifiers
-  - `POST /v1/bot/mint`           — web-callable, mints bot OBO
-  - `GET  /v1/bot/:uid/token`     — daemon-callable, returns bot_token
-- `modules/runtime/` HTTP routes deprecated via `LEGACY_RUNTIME_ROUTES`
-  env (default false → 404). Schema migrations still apply so
-  re-enable is one env var away.
-
-## Known scope gaps (deferred work)
-
-- **Bot creation flow not fully refactored**: fleet's `POST /v1/runtimes/bots`
-  currently inserts a draft row but does not yet trigger the full
-  3-step orchestration (web → fleet draft → web → server mint → web →
-  fleet patch). Bot list / get / archive work; create needs a follow-up.
-- **bot_task table lives in fleet temporarily**. PR-B will move it to
-  `octo-matter` per the original plan (so matter can write the queue
-  in the same transaction as the timeline entry).
-- **server's `modules/runtime/` code retained**: routes are off but
-  files remain. PR-C deletes them once fleet stability is proven.
+Apache License 2.0 — see [`LICENSE`](./LICENSE).
