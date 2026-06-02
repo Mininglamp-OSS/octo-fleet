@@ -589,6 +589,12 @@ func (rt *Runtime) getBotFeed(c *wkhttp.Context) {
 		`SELECT matter_base_url FROM bot_task WHERE bot_uid=? AND matter_base_url!='' ORDER BY id DESC LIMIT 1`,
 		m.BotUID,
 	).LoadOne(&matterBaseURL)
+	// PR-B.3: fleet's bot_task table is no longer written to (matter
+	// owns the queue now). Fall back to OCTO_MATTER_URL env so the
+	// feed proxy still works after the cutover.
+	if matterBaseURL == "" {
+		matterBaseURL = os.Getenv("OCTO_MATTER_URL")
+	}
 	if matterBaseURL == "" {
 		c.Response(gin.H{"items": []any{}})
 		return
