@@ -53,7 +53,13 @@ func (rt *Runtime) Route(r *wkhttp.WKHttp) {
 		daemon.POST("/ping/:ping_id", rt.pingReport)
 		daemon.POST("/upgrade/:task_id", rt.upgradeReport)
 		daemon.POST("/bots/:id/ack", rt.ackBot)
-		daemon.POST("/bot-tasks/:id/ack", rt.ackBotTask)
+		// PR-B.3: bot_task lives in octo-matter now. Daemons ack to
+		// matter, not fleet. Stale daemons still POSTing here would
+		// otherwise hit ackBotTask, which UPDATEs fleet's local
+		// bot_task table AND fires writebacks to matter — that would
+		// duplicate the timeline entry the daemon already wrote, or
+		// fight matter's own claim_token guard.
+		daemon.POST("/bot-tasks/:id/ack", rt.ackBotTaskDeprecated)
 	}
 
 	internal := r.Group("/v1/internal", rt.internalTokenAuth())

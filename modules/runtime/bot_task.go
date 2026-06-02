@@ -574,3 +574,11 @@ func (rt *Runtime) postMatterActivity(m *botTaskModel) error {
 func (rt *Runtime) createBotTaskDeprecated(c *wkhttp.Context) {
 	c.AbortWithStatusJSON(410, gin.H{"msg": "bot_task moved to octo-matter — POST /api/v1/internal/bot-tasks lives there now"})
 }
+
+// ackBotTaskDeprecated returns 410 Gone. PR-B.3: bot_task moved to
+// octo-matter; daemon acks to matter directly via
+// POST /api/v1/internal/bot-tasks/:id/ack. The original ackBotTask
+// implementation is retained for rollback only.
+func (rt *Runtime) ackBotTaskDeprecated(c *wkhttp.Context) {
+	c.AbortWithStatusJSON(410, gin.H{"msg": "bot_task ack moved to octo-matter — POST /api/v1/internal/bot-tasks/:id/ack there"})
+}
