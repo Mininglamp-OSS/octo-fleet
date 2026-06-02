@@ -565,3 +565,12 @@ func (rt *Runtime) postMatterActivity(m *botTaskModel) error {
 	}
 	return nil
 }
+
+
+// createBotTaskDeprecated returns 410 Gone. PR-B.3: bot_task moved to
+// octo-matter, fleet no longer accepts enqueue requests. Original
+// implementation kept as createBotTask for rollback (re-wire in
+// 1module.go Route() if needed).
+func (rt *Runtime) createBotTaskDeprecated(c *wkhttp.Context) {
+	c.AbortWithStatusJSON(410, gin.H{"msg": "bot_task moved to octo-matter — POST /api/v1/internal/bot-tasks lives there now"})
+}

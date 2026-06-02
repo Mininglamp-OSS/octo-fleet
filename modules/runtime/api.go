@@ -58,7 +58,11 @@ func (rt *Runtime) Route(r *wkhttp.WKHttp) {
 
 	internal := r.Group("/v1/internal", rt.internalTokenAuth())
 	{
-		internal.POST("/bot-tasks", rt.createBotTask)
+		// PR-B.3: bot_task ownership moved to matter (see octo-matter
+		// migrations/008_bot_task.sql). Fleet no longer accepts task
+		// enqueue requests. The route is closed off but the handler
+		// implementation is kept until PR-C for rollback.
+		internal.POST("/bot-tasks", rt.createBotTaskDeprecated)
 	}
 
 	authGroup := r.Group("/v1", auth.Middleware("web"))
@@ -255,21 +259,13 @@ func (rt *Runtime) heartbeat(c *wkhttp.Context) {
 	}
 
 	// PR-B.2: managed_bots tells the daemon which bots to poll from
-	// matter on this heartbeat tick. Replaces fleet's own pending_task
-	// dispatch (still emitted below as a fallback for pre-PR-B.2
-	// daemons that don't know about managed_bots).
+	// matter on this heartbeat tick. PR-B.3 dropped the legacy
+	// pending_task fallback — daemon expects matter-only dispatch now.
 	managed, mberr := rt.db.listActiveBotsForDaemon(existing.DaemonID)
 	if mberr != nil {
 		rt.Warn("listActiveBotsForDaemon failed", zap.Error(mberr), zap.String("daemon_id", existing.DaemonID))
 	} else if len(managed) > 0 {
 		resp["managed_bots"] = managed
-	}
-
-	// Same pull pattern for matter-driven bot tasks. (Pre-PR-B.2 fallback;
-	// after PR-B daemon ignores this in favor of pulling directly.)
-	claimedTask, _ := rt.db.claimPendingBotTask(existing.DaemonID)
-	if claimedTask != nil {
-		resp["pending_task"] = rt.buildPendingBotTask(claimedTask)
 	}
 
 	c.Response(resp)
