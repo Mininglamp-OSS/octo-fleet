@@ -680,11 +680,14 @@ func isVersionOlder(current, latest string) bool {
 }
 
 func (rt *Runtime) runSweeper() {
-	ticker := time.NewTicker(30 * time.Second)
+	// Sweeper cadence and staleThreshold are coupled to daemon HeartbeatInterval
+	// (octo-daemon-cli/internal/config.go). staleThreshold ≈ 3x heartbeat; sweeper
+	// cadence ≤ staleThreshold so detection latency stays within one cycle.
+	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
 	for range ticker.C {
-		staleThreshold := 45 * time.Second
+		staleThreshold := 15 * time.Second
 		n, err := rt.db.markStaleOffline(staleThreshold)
 		if err != nil {
 			rt.Error("sweep stale runtimes", zap.Error(err))
