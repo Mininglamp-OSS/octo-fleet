@@ -683,18 +683,29 @@ func (rt *Runtime) runSweeper() {
 	// Sweeper cadence and staleThreshold are coupled to daemon HeartbeatInterval
 	// (octo-daemon-cli/internal/config.go). staleThreshold ≈ 3x heartbeat; sweeper
 	// cadence ≤ staleThreshold so detection latency stays within one cycle.
+	const staleThreshold = 15 * time.Second
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
+	// Cold-start grace: skip stale check for 2× staleThreshold after boot.
+	// Without this, fleet restart can mark all daemons stale before they
+	// finish their first post-restart heartbeat round.
+	//
+	// graceUntil uses time.Now() which carries a monotonic clock reading;
+	// time.Now().Before(graceUntil) compares monotonic readings, so NTP
+	// wall-clock jumps during the grace window cannot skip it short.
+	graceUntil := time.Now().Add(2 * staleThreshold)
+
 	for range ticker.C {
-		staleThreshold := 15 * time.Second
-		n, err := rt.db.markStaleOffline(staleThreshold)
-		if err != nil {
-			rt.Error("sweep stale runtimes", zap.Error(err))
-			continue
-		}
-		if n > 0 {
-			rt.Info("marked stale runtimes offline", zap.Int64("count", n))
+		if !time.Now().Before(graceUntil) {
+			n, err := rt.db.markStaleOffline(staleThreshold)
+			if err != nil {
+				rt.Error("sweep stale runtimes", zap.Error(err))
+				continue
+			}
+			if n > 0 {
+				rt.Info("marked stale runtimes offline", zap.Int64("count", n))
+			}
 		}
 
 		gcThreshold := 7 * 24 * time.Hour
