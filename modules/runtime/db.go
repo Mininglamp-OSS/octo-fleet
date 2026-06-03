@@ -23,14 +23,16 @@ func newRuntimeDB(ctx *config.Context) *runtimeDB {
 
 func (d *runtimeDB) upsert(m *agentRuntimeModel) (int64, error) {
 	result, err := d.session.InsertBySql(`
-		INSERT INTO agent_runtime (space_id, daemon_id, name, provider, runtime_mode, status, version, device_name, device_info, metadata, owner_uid, last_seen_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+		INSERT INTO agent_runtime (space_id, daemon_id, name, provider, runtime_mode, status, version, device_name, device_info, metadata, owner_uid, heartbeat_interval_ms, last_seen_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
 		ON DUPLICATE KEY UPDATE
 			name=VALUES(name), status=VALUES(status), version=VALUES(version),
 			device_name=VALUES(device_name), device_info=VALUES(device_info),
-			metadata=VALUES(metadata), last_seen_at=NOW()`,
+			metadata=VALUES(metadata),
+			heartbeat_interval_ms=IF(VALUES(heartbeat_interval_ms)>0, VALUES(heartbeat_interval_ms), heartbeat_interval_ms),
+			last_seen_at=NOW()`,
 		m.SpaceID, m.DaemonID, m.Name, m.Provider, m.RuntimeMode,
-		m.Status, m.Version, m.DeviceName, m.DeviceInfo, m.Metadata, m.OwnerUID,
+		m.Status, m.Version, m.DeviceName, m.DeviceInfo, m.Metadata, m.OwnerUID, m.HeartbeatIntervalMs,
 	).Exec()
 	if err != nil {
 		return 0, err
@@ -98,12 +100,18 @@ func (d *runtimeDB) setOffline(ids []int64) error {
 	return err
 }
 
-func (d *runtimeDB) markStaleOffline(threshold time.Duration) (int64, error) {
-	cutoff := time.Now().Add(-threshold)
-	result, err := d.session.Update("agent_runtime").
-		Set("status", "offline").
-		Where("status=? AND last_seen_at < ?", "online", cutoff).
-		Exec()
+// markStaleOffline marks every "online" agent_runtime whose last_seen_at
+// is older than its per-row stale threshold. Per-runtime threshold =
+// 3 × heartbeat_interval_ms (or 3 × defaultIntervalMs when the column
+// is 0/unset). Returns the number of rows flipped.
+func (d *runtimeDB) markStaleOffline(defaultIntervalMs int64) (int64, error) {
+	result, err := d.session.UpdateBySql(
+		`UPDATE agent_runtime
+		    SET status='offline'
+		  WHERE status='online'
+		    AND last_seen_at < DATE_SUB(NOW(), INTERVAL (IF(heartbeat_interval_ms>0, heartbeat_interval_ms, ?) * 3 / 1000) SECOND)`,
+		defaultIntervalMs,
+	).Exec()
 	if err != nil {
 		return 0, err
 	}
@@ -301,7 +309,6 @@ func (d *runtimeDB) queryBotInfoByUIDsLegacy(spaceID string, uids []string) (map
 	}
 	return result, nil
 }
-
 
 // listActiveBotsForDaemon returns bot_uid + workspace_id for every active
 // bot whose runtime is hosted by this daemon. Daemon iterates the list on
