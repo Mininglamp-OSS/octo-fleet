@@ -120,6 +120,24 @@ func (rt *Runtime) register(c *wkhttp.Context) {
 		return
 	}
 
+	// Server-side clamp on daemon-reported heartbeat interval. 0 means
+	// "use sweeper default" (see runSweeper). Below 1s would race the
+	// sweeper; above 5min undermines stale detection entirely. Out-of-
+	// range values fall back to 0 (=default) rather than erroring the
+	// register — a misbehaving daemon should still register.
+	const minHeartbeatIntervalMs = 1000
+	const maxHeartbeatIntervalMs = 300000
+	if req.HeartbeatIntervalMs != 0 &&
+		(req.HeartbeatIntervalMs < minHeartbeatIntervalMs || req.HeartbeatIntervalMs > maxHeartbeatIntervalMs) {
+		rt.Warn("daemon-reported heartbeat_interval_ms out of range, falling back to default",
+			zap.String("daemon_id", req.DaemonID),
+			zap.Int64("reported_ms", req.HeartbeatIntervalMs),
+			zap.Int64("min_ms", minHeartbeatIntervalMs),
+			zap.Int64("max_ms", maxHeartbeatIntervalMs),
+		)
+		req.HeartbeatIntervalMs = 0
+	}
+
 	ownerUID := c.MustGet("owner_uid").(string)
 	spaceID := c.MustGet("space_id").(string)
 
@@ -146,17 +164,18 @@ func (rt *Runtime) register(c *wkhttp.Context) {
 		metaBytes, _ := json.Marshal(metaMap)
 
 		m := &agentRuntimeModel{
-			SpaceID:     spaceID,
-			DaemonID:    req.DaemonID,
-			Name:        r.Name,
-			Provider:    r.Type,
-			RuntimeMode: "local",
-			Status:      status,
-			Version:     r.Version,
-			DeviceName:  req.DeviceName,
-			DeviceInfo:  req.DeviceInfo,
-			Metadata:    string(metaBytes),
-			OwnerUID:    ownerUID,
+			SpaceID:             spaceID,
+			DaemonID:            req.DaemonID,
+			Name:                r.Name,
+			Provider:            r.Type,
+			RuntimeMode:         "local",
+			Status:              status,
+			Version:             r.Version,
+			DeviceName:          req.DeviceName,
+			DeviceInfo:          req.DeviceInfo,
+			Metadata:            string(metaBytes),
+			OwnerUID:            ownerUID,
+			HeartbeatIntervalMs: req.HeartbeatIntervalMs,
 		}
 
 		id, err := rt.db.upsert(m)
@@ -680,10 +699,13 @@ func isVersionOlder(current, latest string) bool {
 }
 
 func (rt *Runtime) runSweeper() {
-	// Sweeper cadence and staleThreshold are coupled to daemon HeartbeatInterval
-	// (octo-daemon-cli/internal/config.go). staleThreshold ≈ 3x heartbeat; sweeper
-	// cadence ≤ staleThreshold so detection latency stays within one cycle.
-	const staleThreshold = 15 * time.Second
+	// Per-runtime stale threshold = 3 × daemon-reported heartbeat_interval_ms
+	// (stored on agent_runtime by register). When a daemon registers
+	// against an older fleet (no column), or doesn't yet report the field,
+	// markStaleOffline falls back to defaultHeartbeatIntervalMs below.
+	// staleThreshold here is only used for grace + cold-start scheduling.
+	const defaultHeartbeatIntervalMs int64 = 5000
+	const staleThreshold = 3 * time.Duration(defaultHeartbeatIntervalMs) * time.Millisecond
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
@@ -698,7 +720,7 @@ func (rt *Runtime) runSweeper() {
 
 	for range ticker.C {
 		if !time.Now().Before(graceUntil) {
-			n, err := rt.db.markStaleOffline(staleThreshold)
+			n, err := rt.db.markStaleOffline(defaultHeartbeatIntervalMs)
 			if err != nil {
 				rt.Error("sweep stale runtimes", zap.Error(err))
 				continue
