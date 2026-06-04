@@ -79,7 +79,6 @@ Fleet reads its config from `configs/fleet.yaml` plus the following env override
 
 | Env | Purpose | Default |
 |-----|---------|---------|
-| `OCTO_MATTER_URL` | Base URL for the matter service (used by bot feed proxy) | unset → bot feed returns empty |
 | `NOTIFY_INTERNAL_TOKEN` | Shared X-Internal-Token for legacy `/v1/internal/*` callbacks | unset → those routes 401 |
 
 See `configs/fleet.yaml` for the full schema (`addr`, `db.mysqlAddr`, `db.redisAddr`, `external.baseURL`, `auth.serverJwksURL`).
@@ -138,7 +137,7 @@ and the spec at
 - `GET  /v1/runtimes` — list registered runtimes in space
 - `POST /v1/runtimes/bots` — create bot (draft)
 - `POST /v1/runtimes/bots/:id/mint` — patch with server-minted `bot_uid` to start provision
-- `GET  /v1/runtimes/bots[/:id[/feed]]` — read APIs
+- `GET  /v1/runtimes/bots[/:id]` — read APIs (bot feed moved to matter: `GET /matter/api/v1/bots/:bot_uid/feed`)
 - `DELETE /v1/runtimes/bots/:id` — archive
 
 ## 🚧 PoC status
@@ -149,7 +148,6 @@ production:
 
 - [ ] Unit tests for `internal/auth` and bot creation flow
 - [ ] Clean up legacy `bot_task.go` (PR-B.3 deprecated the table; code retained for rollback)
-- [ ] Drop fleet → matter HTTP proxy in bot feed; have browser call matter directly
 - [ ] Wire CI lint + golangci-lint
 
 ## 📜 License
