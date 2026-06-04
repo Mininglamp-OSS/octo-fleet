@@ -524,12 +524,13 @@ func (rt *Runtime) ackBot(c *wkhttp.Context) {
 }
 
 // buildPendingBotProvision renders the heartbeat payload for daemon.
+//
+// Note: api_url is intentionally NOT included here. Fleet has no reliable
+// source for the IM server URL — `cfg.External.BaseURL` is fleet's own
+// external URL (per octo-lib config contract), not server's. Daemon already
+// resolves api_url from its own `OCTO_SERVER_URL` env / `--api-url` flag,
+// which is the single source of truth for "where is the IM server".
 func (rt *Runtime) buildPendingBotProvision(m *botModel) gin.H {
-	cfg := rt.ctx.GetConfig()
-	apiURL := cfg.External.BaseURL
-	if strings.TrimSpace(apiURL) == "" {
-		apiURL = fmt.Sprintf("http://%s:8090", cfg.External.IP)
-	}
 	return gin.H{
 		"id":           m.Id,
 		"action":       "bot.provision",
@@ -537,7 +538,6 @@ func (rt *Runtime) buildPendingBotProvision(m *botModel) gin.H {
 		"display_name": m.Name,
 		"bot_uid":      m.BotUID,
 		"bot_token":    m.BotToken,
-		"api_url":      apiURL,
 		"claim_token":  m.ClaimToken,
 	}
 }
