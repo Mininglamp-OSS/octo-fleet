@@ -68,15 +68,17 @@ func main() {
 	logOpts.LogDir = cfg.Logger.Dir
 	log.Configure(logOpts)
 
-	// JWT verifier singleton — viper field `auth.serverJwksURL` points
-	// at octo-server's /.well-known/jwks.json. The octo-lib Config
-	// struct exposes no public field for this so we read directly off
-	// viper (which already loaded the yaml above).
+	// Auth middleware singleton (合并 plan §4): fleet calls server's
+	// verify-* endpoints to authenticate user / bot / api_key callers.
+	// We reuse the existing `auth.serverJwksURL` viper field for backward
+	// compat — derive the server base URL from it; Phase 4 cleanup will
+	// rename this to a dedicated `auth.octoServerURL` field.
 	jwksURL := vp.GetString("auth.serverJwksURL")
 	if jwksURL == "" {
 		jwksURL = "http://localhost:8090/.well-known/jwks.json"
 	}
-	auth.Initialize(jwksURL)
+	octoServerURL := strings.TrimSuffix(jwksURL, "/.well-known/jwks.json")
+	auth.Initialize(auth.Config{OctoIMURL: octoServerURL})
 
 	// octo-fleet is API-only — no grpc, no message worker, no cron events.
 	runAPI(ctx)
