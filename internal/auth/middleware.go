@@ -420,6 +420,10 @@ func Initialize(cfg Config) {
 
 // Middleware is the wkhttp-flavored wrapper around AuthMiddleware +
 // RequireKind. Panics if Initialize wasn't called — that's a config bug.
+//
+// Aliases "uid" → "owner_uid" in the gin context so the existing
+// handlers' c.MustGet("owner_uid") calls keep working without churn
+// (合并 plan §3 字段名跨服务映射: fleet 业务列就叫 owner_uid).
 func Middleware(scope string) wkhttp.HandlerFunc {
 	if defaultCfg.OctoIMURL == "" {
 		panic("auth: Initialize not called before Middleware")
@@ -432,6 +436,14 @@ func Middleware(scope string) wkhttp.HandlerFunc {
 			return
 		}
 		kindH(c.Context)
+		if c.IsAborted() {
+			return
+		}
+		if uid, ok := c.Get("uid"); ok {
+			if s, ok2 := uid.(string); ok2 && s != "" {
+				c.Set("owner_uid", s)
+			}
+		}
 	}
 }
 
