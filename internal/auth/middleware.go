@@ -75,9 +75,9 @@ type verifyAPIKeyResp struct {
 //   - Bot:     "Authorization: Bearer bf_<token>" → POST /v1/auth/verify-bot
 //   - APIKey:  "Authorization: Bearer uk_<key>"   → POST /v1/auth/verify-api-key (daemon)
 //
-// Prefix dispatch is strict (HasPrefix + min length); Bearer headers that
-// don't match uk_ fall through to bot path, letting server verify-bot
-// reject them. Phase 4 will tighten this to outright 401 for non-uk_/bf_.
+// Prefix dispatch is strict (HasPrefix + min length). Bearer headers
+// without uk_ or bf_ prefix are rejected outright (Phase 4 收紧, 不再
+// fall through to bot path letting server verify-bot reject).
 //
 // On success, injects into gin context:
 //   - "uid"            — caller identity (user uid / bot uid / api_key owner uid)
@@ -154,8 +154,16 @@ func AuthMiddleware(cfg Config) gin.HandlerFunc {
 				handleAPIKeyAuth(c, client, cfg.OctoIMURL, token, cache)
 				return
 			}
-			// Bot token (or any other Bearer): let server verify-bot decide.
-			handleBotAuth(c, client, cfg.OctoIMURL, token, cache)
+			// Bot token: strict bf_ prefix.
+			if strings.HasPrefix(token, botTokenPrefix) {
+				handleBotAuth(c, client, cfg.OctoIMURL, token, cache)
+				return
+			}
+			// 合并 plan 决策一+二 Phase 4: 非 uk_/bf_ 的 Bearer 直接 401
+			// (旧 JWT 路径已删, 不再 fall through 让 server verify-bot 兜底).
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+				"error": gin.H{"code": "UNAUTHORIZED", "message": "Bearer token must start with uk_ or bf_"},
+			})
 			return
 		}
 
@@ -184,7 +192,6 @@ func handleUserAuth(c *gin.Context, client *http.Client, baseURL, token string, 
 			relatedUIDs = append(relatedUIDs, bot.UID)
 		}
 		c.Set("related_uids", relatedUIDs)
-		c.Next()
 		return
 	}
 
@@ -228,7 +235,6 @@ func handleUserAuth(c *gin.Context, client *http.Client, baseURL, token string, 
 	// Cache for 60s
 	cache.set("user:"+token, &result, 60*time.Second)
 
-	c.Next()
 }
 
 func handleBotAuth(c *gin.Context, client *http.Client, baseURL, botToken string, cache *verifyCache) {
@@ -250,7 +256,6 @@ func handleBotAuth(c *gin.Context, client *http.Client, baseURL, botToken string
 		}
 		relatedUIDs := []string{result.BotUID}
 		c.Set("related_uids", relatedUIDs)
-		c.Next()
 		return
 	}
 
@@ -303,7 +308,6 @@ func handleBotAuth(c *gin.Context, client *http.Client, baseURL, botToken string
 
 	cache.set("bot:"+botToken, &result, 60*time.Second)
 
-	c.Next()
 }
 
 // handleAPIKeyAuth verifies a daemon api_key by calling server's
@@ -316,7 +320,6 @@ func handleAPIKeyAuth(c *gin.Context, client *http.Client, baseURL, apiKey strin
 	if cached, ok := cache.get("apikey:" + apiKey); ok {
 		result := cached.(*verifyAPIKeyResp)
 		applyAPIKeyResult(c, result)
-		c.Next()
 		return
 	}
 
@@ -349,7 +352,6 @@ func handleAPIKeyAuth(c *gin.Context, client *http.Client, baseURL, apiKey strin
 	applyAPIKeyResult(c, &result)
 	cache.set("apikey:"+apiKey, &result, 60*time.Second)
 
-	c.Next()
 }
 
 func applyAPIKeyResult(c *gin.Context, r *verifyAPIKeyResp) {
@@ -387,7 +389,6 @@ func RequireKind(allowed ...string) gin.HandlerFunc {
 			})
 			return
 		}
-		c.Next()
 	}
 }
 
@@ -421,9 +422,13 @@ func Initialize(cfg Config) {
 // Middleware is the wkhttp-flavored wrapper around AuthMiddleware +
 // RequireKind. Panics if Initialize wasn't called — that's a config bug.
 //
-// Aliases "uid" → "owner_uid" in the gin context so the existing
-// handlers' c.MustGet("owner_uid") calls keep working without churn
-// (合并 plan §3 字段名跨服务映射: fleet 业务列就叫 owner_uid).
+// session 路径下 AuthMiddleware 不注入 space_id (一 user 可在多 space),
+// wrapper 末尾从 X-Space-Id header 兜底注入. 浏览器 axios interceptor 已
+// 自动带这个 header; raw fetch caller 需要手动加.
+//
+// 注: 不要在 handle*Auth / RequireKind 末尾调 c.Next() — gin engine 的
+// for-loop 会自动 advance handler 链, 显式 c.Next 会嵌套触发 business
+// handler 跑在 wrapper 后续逻辑之前 (e.g. 拿不到这里 set 的 space_id).
 func Middleware(scope string) wkhttp.HandlerFunc {
 	if defaultCfg.OctoIMURL == "" {
 		panic("auth: Initialize not called before Middleware")
@@ -439,9 +444,10 @@ func Middleware(scope string) wkhttp.HandlerFunc {
 		if c.IsAborted() {
 			return
 		}
-		if uid, ok := c.Get("uid"); ok {
-			if s, ok2 := uid.(string); ok2 && s != "" {
-				c.Set("owner_uid", s)
+		// session 路径补 space_id (api_key/bot 路径已由 AuthMiddleware 注入).
+		if _, exists := c.Get("space_id"); !exists {
+			if sid := c.GetHeader("X-Space-Id"); sid != "" {
+				c.Set("space_id", sid)
 			}
 		}
 	}

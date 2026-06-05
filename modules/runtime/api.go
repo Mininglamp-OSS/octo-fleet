@@ -137,7 +137,7 @@ func (rt *Runtime) register(c *wkhttp.Context) {
 		req.HeartbeatIntervalMs = 0
 	}
 
-	ownerUID := c.MustGet("owner_uid").(string)
+	ownerUID := c.MustGet("uid").(string)
 	spaceID := c.MustGet("space_id").(string)
 
 	var registered []registeredRuntimeResp
@@ -233,7 +233,7 @@ func (rt *Runtime) heartbeat(c *wkhttp.Context) {
 		return
 	}
 
-	ownerUID := c.MustGet("owner_uid").(string)
+	ownerUID := c.MustGet("uid").(string)
 	spaceID := c.MustGet("space_id").(string)
 
 	existing, err := rt.db.queryByID(req.RuntimeID)
@@ -303,7 +303,7 @@ func (rt *Runtime) deregister(c *wkhttp.Context) {
 		return
 	}
 
-	ownerUID := c.MustGet("owner_uid").(string)
+	ownerUID := c.MustGet("uid").(string)
 	spaceID := c.MustGet("space_id").(string)
 
 	for _, id := range req.RuntimeIDs {
@@ -590,7 +590,7 @@ func (rt *Runtime) pingReport(c *wkhttp.Context) {
 		return
 	}
 
-	ownerUID := c.MustGet("owner_uid").(string)
+	ownerUID := c.MustGet("uid").(string)
 	apiSpaceID := c.MustGet("space_id").(string)
 	if entry.SpaceID != apiSpaceID {
 		c.ResponseErrorWithStatus(errors.New("no permission"), 403)

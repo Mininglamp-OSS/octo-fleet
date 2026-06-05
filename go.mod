@@ -5,10 +5,10 @@ go 1.25
 require (
 	github.com/Mininglamp-OSS/octo-lib v0.0.0-20260515014003-2cdafe082b88
 	github.com/gin-gonic/gin v1.9.1
-	github.com/go-jose/go-jose/v3 v3.0.5
 	github.com/gocraft/dbr/v2 v2.7.5
 	github.com/judwhite/go-svc v1.2.1
 	github.com/spf13/viper v1.16.0
+	github.com/stretchr/testify v1.8.3
 	go.uber.org/zap v1.24.0
 )
 
@@ -26,6 +26,7 @@ require (
 	github.com/bytedance/sonic v1.9.1 // indirect
 	github.com/cespare/xxhash/v2 v2.2.0 // indirect
 	github.com/chenzhuoyu/base64x v0.0.0-20221115062448-fe3a3abad311 // indirect
+	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
 	github.com/eapache/queue v1.1.0 // indirect
 	github.com/fsnotify/fsnotify v1.6.0 // indirect
@@ -72,6 +73,7 @@ require (
 	github.com/panjf2000/ants/v2 v2.10.0 // indirect
 	github.com/pelletier/go-toml/v2 v2.0.8 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
+	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/robfig/cron/v3 v3.0.1 // indirect
 	github.com/rubenv/sql-migrate v1.5.2 // indirect
 	github.com/sendgrid/rest v2.6.9+incompatible // indirect

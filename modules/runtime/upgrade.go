@@ -436,7 +436,7 @@ func (rt *Runtime) upgradeGet(c *wkhttp.Context) {
 
 // POST /v1/daemon/upgrade/:task_id
 func (rt *Runtime) upgradeReport(c *wkhttp.Context) {
-	ownerUID := c.MustGet("owner_uid").(string)
+	ownerUID := c.MustGet("uid").(string)
 	apiSpaceID := c.MustGet("space_id").(string)
 	taskID := c.Param("task_id")
 

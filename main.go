@@ -72,7 +72,8 @@ func main() {
 	// verify-* endpoints to authenticate user / bot / api_key callers.
 	// 合并 plan 决策一+二 Phase 4: 改用专用字段 auth.octoServerURL.
 	// 仍 fallback 旧字段 auth.serverJwksURL (反推 base URL) 兼容未更新的
-	// fleet.yaml — 一段时间后旧字段也删.
+	// fleet.yaml. **下个发版前删除 serverJwksURL fallback** (运维需保证
+	// fleet.yaml 已更新到 octoServerURL).
 	octoServerURL := vp.GetString("auth.octoServerURL")
 	if octoServerURL == "" {
 		jwksURL := vp.GetString("auth.serverJwksURL")
