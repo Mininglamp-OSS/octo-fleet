@@ -511,6 +511,14 @@ func (rt *Runtime) ackBot(c *wkhttp.Context) {
 		c.ResponseErrorWithStatus(errors.New("no permission"), http.StatusForbidden)
 		return
 	}
+	// 合并 plan 决策一+二 Phase 3B 补漏: ackBot 加 owner_uid 校验 (defense
+	// in depth). claim_token 防伪已经够, 但额外校验 caller (daemon) 的 uid
+	// 必须等于 bot owner_uid, 防止 daemon 配错 api_key 后误改别人 bot 状态.
+	ownerUID := c.MustGet("owner_uid").(string)
+	if m.OwnerUID != ownerUID {
+		c.ResponseErrorWithStatus(errors.New("no permission"), http.StatusForbidden)
+		return
+	}
 	if m.ClaimToken == "" || m.ClaimToken != req.ClaimToken {
 		c.ResponseErrorWithStatus(errors.New("invalid or stale claim_token"), http.StatusConflict)
 		return

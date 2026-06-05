@@ -541,10 +541,12 @@ func (rt *Runtime) pingInit(c *wkhttp.Context) {
 		c.ResponseErrorWithStatus(errors.New("no permission to ping this device"), 403)
 		return
 	}
+	// 合并 plan 决策一+二 Phase 3B 补漏: pingInit 加 owner_uid 校验, 防止
+	// 同 space 内 user A 让 user B 的 daemon 来 ping (拿 RTT 等数据).
 	var accessCount int
 	if err := rt.db.session.SelectBySql(
-		`SELECT COUNT(*) FROM agent_runtime WHERE space_id = ? AND daemon_id = ?`,
-		req.SpaceID, req.DaemonID,
+		`SELECT COUNT(*) FROM agent_runtime WHERE space_id = ? AND daemon_id = ? AND owner_uid = ?`,
+		req.SpaceID, req.DaemonID, loginUID,
 	).LoadOne(&accessCount); err != nil {
 		rt.Error("check daemon access", zap.Error(err))
 		c.ResponseError(errors.New("query failed"))
@@ -635,7 +637,24 @@ func (rt *Runtime) pingGet(c *wkhttp.Context) {
 		c.ResponseErrorWithStatus(errors.New("no permission"), 403)
 		return
 	}
-	_ = loginUID
+	// 合并 plan 决策一+二 Phase 3B 补漏: pingGet 加 owner_uid 校验, 防止
+	// user A 拿 user B 的 ping 结果. pingEntry 表没有 owner_uid 字段, 通过
+	// daemon_id JOIN agent_runtime 反查 owner.
+	//
+	// fail-secure: agent_runtime 已被清 / 查询失败时一律拒, 不放行 (避免
+	// 攻击者构造不存在的 daemon_id 绕过校验).
+	var pingOwnerUID string
+	if err := rt.db.session.SelectBySql(
+		`SELECT owner_uid FROM agent_runtime WHERE space_id=? AND daemon_id=? LIMIT 1`,
+		entry.SpaceID, entry.DaemonID,
+	).LoadOne(&pingOwnerUID); err != nil || pingOwnerUID == "" {
+		c.ResponseErrorWithStatus(errors.New("no permission"), 403)
+		return
+	}
+	if pingOwnerUID != loginUID {
+		c.ResponseErrorWithStatus(errors.New("no permission"), 403)
+		return
+	}
 
 	c.Response(gin.H{
 		"ping_id": entry.ID,
