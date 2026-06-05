@@ -5,8 +5,8 @@
 //   - bot CRUD (orchestration metadata only — bot_token stays on octo-server)
 //   - bot.provision command dispatch via daemon heartbeat
 //
-// Auth: JWT (RS256) issued by octo-server. fleet pulls server's jwks.json
-// once at startup and verifies tokens locally — no server-to-fleet HTTP.
+// Auth: fleet calls octo-server /v1/auth/verify-* endpoints (合并 plan
+// 决策一+二). 旧 JWT/JWKS 验签链路已删 (Phase 2 起).
 package main
 
 import (
@@ -70,14 +70,18 @@ func main() {
 
 	// Auth middleware singleton (合并 plan §4): fleet calls server's
 	// verify-* endpoints to authenticate user / bot / api_key callers.
-	// We reuse the existing `auth.serverJwksURL` viper field for backward
-	// compat — derive the server base URL from it; Phase 4 cleanup will
-	// rename this to a dedicated `auth.octoServerURL` field.
-	jwksURL := vp.GetString("auth.serverJwksURL")
-	if jwksURL == "" {
-		jwksURL = "http://localhost:8090/.well-known/jwks.json"
+	// 合并 plan 决策一+二 Phase 4: 改用专用字段 auth.octoServerURL.
+	// 仍 fallback 旧字段 auth.serverJwksURL (反推 base URL) 兼容未更新的
+	// fleet.yaml — 一段时间后旧字段也删.
+	octoServerURL := vp.GetString("auth.octoServerURL")
+	if octoServerURL == "" {
+		jwksURL := vp.GetString("auth.serverJwksURL")
+		if jwksURL == "" {
+			octoServerURL = "http://localhost:8090"
+		} else {
+			octoServerURL = strings.TrimSuffix(jwksURL, "/.well-known/jwks.json")
+		}
 	}
-	octoServerURL := strings.TrimSuffix(jwksURL, "/.well-known/jwks.json")
 	auth.Initialize(auth.Config{OctoIMURL: octoServerURL})
 
 	// octo-fleet is API-only — no grpc, no message worker, no cron events.
