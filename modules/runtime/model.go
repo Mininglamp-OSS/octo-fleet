@@ -149,6 +149,7 @@ type pingEntry struct {
 	ID       string `db:"id"`
 	SpaceID  string `db:"space_id"`
 	DaemonID string `db:"daemon_id"`
+	OwnerUID string `db:"owner_uid"` // v3.3.1 §C.1: paired with runtime-20260606-02 schema migration
 	ServerTS int64  `db:"server_ts"`
 	DaemonTS int64  `db:"daemon_ts"`
 	RTT      int64  `db:"rtt_ms"`

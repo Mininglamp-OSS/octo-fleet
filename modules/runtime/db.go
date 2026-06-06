@@ -177,9 +177,12 @@ func (d *runtimeDB) upsertLatestVersion(component, latestVersion, releaseMeta st
 // Ping DB operations
 
 func (d *runtimeDB) insertPing(p *pingEntry) error {
+	// v3.3.1 §C.1: persist owner_uid so cross-owner daemon_id collision
+	// (allowed by runtime-20260606-01 4-tuple unique key) can't fool the
+	// later claim/get/report queries into resolving the wrong owner's row.
 	_, err := d.session.InsertBySql(
-		`INSERT INTO runtime_ping (id, space_id, daemon_id, server_ts, status) VALUES (?, ?, ?, ?, ?)`,
-		p.ID, p.SpaceID, p.DaemonID, p.ServerTS, p.Status,
+		`INSERT INTO runtime_ping (id, space_id, daemon_id, owner_uid, server_ts, status) VALUES (?, ?, ?, ?, ?, ?)`,
+		p.ID, p.SpaceID, p.DaemonID, p.OwnerUID, p.ServerTS, p.Status,
 	).Exec()
 	return err
 }
@@ -189,21 +192,26 @@ func (d *runtimeDB) insertPing(p *pingEntry) error {
 //
 // owner_uid filter (defense-in-depth, reviewer fleet#24 Jerry-Xin): same-space
 // daemon_id collision across owners is possible because register accepts
-// caller-supplied daemon_id with no cross-owner uniqueness constraint. Without
-// this filter, user B's heartbeat could claim a ping that server dispatched
-// for user A's daemon (same daemon_id, same space). EXISTS sub-query ties the
-// claim to the calling owner's runtime row.
+// caller-supplied daemon_id with no cross-owner uniqueness constraint.
+//
+// v3.3.1 §C.1: now also filters on runtime_ping.owner_uid directly
+// (added by runtime-20260606-02 migration). The EXISTS subquery alone
+// was insufficient — it only checked that the caller owns SOME runtime
+// row for the (space, daemon) pair, but didn't guarantee the ping row
+// itself belonged to the caller. With both filters, a cross-owner
+// caller can neither claim the wrong owner's pending ping nor
+// accidentally bind one of their own dispatched rows to a foreign ping.
 func (d *runtimeDB) claimPendingPing(spaceID, daemonID, ownerUID string, dispatchTS int64) (*pingEntry, error) {
 	// Atomic: only one heartbeat can claim each ping
 	result, err := d.session.UpdateBySql(
 		`UPDATE runtime_ping SET status='dispatched', server_ts=?
-		 WHERE space_id=? AND daemon_id=? AND status='pending'
+		 WHERE space_id=? AND daemon_id=? AND owner_uid=? AND status='pending'
 		   AND EXISTS (SELECT 1 FROM agent_runtime ar
 		               WHERE ar.space_id=runtime_ping.space_id
 		                 AND ar.daemon_id=runtime_ping.daemon_id
 		                 AND ar.owner_uid=?)
 		 ORDER BY created_at DESC LIMIT 1`,
-		dispatchTS, spaceID, daemonID, ownerUID,
+		dispatchTS, spaceID, daemonID, ownerUID, ownerUID,
 	).Exec()
 	if err != nil {
 		return nil, err
@@ -212,19 +220,22 @@ func (d *runtimeDB) claimPendingPing(spaceID, daemonID, ownerUID string, dispatc
 	if rows == 0 {
 		return nil, nil
 	}
-	// Fetch the one we just claimed
+	// Fetch the one we just claimed — v3.3.1 §C.1 scoped by owner_uid too.
 	var p *pingEntry
 	_, err = d.session.SelectBySql(
-		`SELECT id, space_id, daemon_id, server_ts, daemon_ts, rtt_ms, status FROM runtime_ping WHERE space_id=? AND daemon_id=? AND status='dispatched' ORDER BY created_at DESC LIMIT 1`,
-		spaceID, daemonID,
+		`SELECT id, space_id, daemon_id, owner_uid, server_ts, daemon_ts, rtt_ms, status FROM runtime_ping
+		 WHERE space_id=? AND daemon_id=? AND owner_uid=? AND status='dispatched' ORDER BY created_at DESC LIMIT 1`,
+		spaceID, daemonID, ownerUID,
 	).Load(&p)
 	return p, err
 }
 
 func (d *runtimeDB) getPing(pingID string) (*pingEntry, error) {
+	// v3.3.1 §C.1: include owner_uid so callers can compare it directly
+	// instead of round-tripping through agent_runtime.
 	var p *pingEntry
 	_, err := d.session.SelectBySql(
-		`SELECT id, space_id, daemon_id, server_ts, daemon_ts, rtt_ms, status FROM runtime_ping WHERE id=?`,
+		`SELECT id, space_id, daemon_id, owner_uid, server_ts, daemon_ts, rtt_ms, status FROM runtime_ping WHERE id=?`,
 		pingID,
 	).Load(&p)
 	return p, err

@@ -125,15 +125,69 @@ func TestClaimPendingBotProvision_OwnerFilterRegressionNet(t *testing.T) {
 	assertHasOwnerUIDFilter(t, "claimPendingBotProvision", body)
 }
 
-// pingGet's owner check shifted from SELECT-then-compare to
-// SELECT-COUNT-WHERE in v3 §4.6 (yujiawei P1). The regression net
-// asserts the new shape: ownerUID must be bound in the WHERE.
+// pingGet's owner check shifted across two rounds:
+//   - v3 §4.6 (yujiawei P1): SELECT owner_uid → SELECT COUNT(*) WHERE owner_uid
+//   - v3.3.1 §C.1 (Jerry-Xin Critical 三审): runtime_ping now has its own
+//     owner_uid column (runtime-20260606-02 migration), so pingGet
+//     reads entry.OwnerUID directly and compares against loginUID,
+//     dropping the COUNT round-trip entirely.
+// Regression net asserts the new shape: entry.OwnerUID direct compare
+// + assertHasOwnerUIDFilter rejects any future drift back to the
+// owner-less SELECT pattern.
 func TestPingGet_OwnerFilterRegressionNet(t *testing.T) {
 	src := mustReadSource(t, "api.go")
 	body := extractFuncBody(t, src, "pingGet")
-	assertHasOwnerUIDFilter(t, "pingGet", body)
-	if !strings.Contains(body, "COUNT(*)") {
-		t.Errorf("pingGet must use COUNT(*) with owner_uid WHERE (v3 §4.6); old SELECT-LIMIT-1 was non-deterministic")
+	if !strings.Contains(body, "entry.OwnerUID != loginUID") {
+		t.Errorf("pingGet must compare entry.OwnerUID against loginUID directly (v3.3.1 §C.1); body:\n%s", body)
+	}
+}
+
+// v3.3.1 §C.1 (Jerry-Xin Critical 1 三审): runtime_ping inserts and
+// claim/select queries must persist + filter owner_uid since the column
+// was added in runtime-20260606-02. Without these, schema migration
+// 20260606-01 (agent_runtime 4-tuple unique key allowing cross-owner
+// daemon_id sharing) leaves runtime_ping's queries to ambiguously
+// resolve which owner owns a given (space, daemon) ping row.
+func TestInsertPing_PersistsOwnerUIDRegressionNet(t *testing.T) {
+	src := mustReadSource(t, "db.go")
+	body := extractFuncBody(t, src, "insertPing")
+	if !strings.Contains(body, "owner_uid") || !strings.Contains(body, "p.OwnerUID") {
+		t.Errorf("insertPing must persist p.OwnerUID into runtime_ping.owner_uid (v3.3.1 §C.1); body:\n%s", body)
+	}
+}
+
+func TestCompleteUpgradeIfMatched_OwnerScopedRegressionNet(t *testing.T) {
+	src := mustReadSource(t, "upgrade.go")
+	body := extractFuncBody(t, src, "completeUpgradeIfMatched")
+	assertHasOwnerUIDFilter(t, "completeUpgradeIfMatched", body)
+	if !strings.Contains(body, "space_id=?") {
+		t.Errorf("completeUpgradeIfMatched must scope by space_id=? as well as owner_uid=? (v3.3.1 §C.2)")
+	}
+}
+
+func TestCompleteUpgradeIfMatchedWithRuntime_OwnerScopedRegressionNet(t *testing.T) {
+	src := mustReadSource(t, "upgrade.go")
+	body := extractFuncBody(t, src, "completeUpgradeIfMatchedWithRuntime")
+	assertHasOwnerUIDFilter(t, "completeUpgradeIfMatchedWithRuntime", body)
+	if !strings.Contains(body, "space_id=?") {
+		t.Errorf("completeUpgradeIfMatchedWithRuntime must scope by space_id=? as well (v3.3.1 §C.2)")
+	}
+}
+
+// v3.3.1 §C.3: insertUpgradeTask's FOR UPDATE lock + active-count both
+// scoped by owner so cross-tenant DoS via shared daemon_id is blocked.
+func TestInsertUpgradeTask_OwnerScopedLockAndCountRegressionNet(t *testing.T) {
+	src := mustReadSource(t, "upgrade.go")
+	body := extractFuncBody(t, src, "insertUpgradeTask")
+	// Both the FOR UPDATE row lock AND the active-count SELECT must
+	// reference owner_uid; the post-§4.4 schema lets two owners share
+	// daemon_id, so scoping only by daemon_id makes ownerA's pending
+	// upgrade block ownerB's unrelated one.
+	if !strings.Contains(body, "FOR UPDATE") {
+		t.Errorf("insertUpgradeTask must still use FOR UPDATE to serialize per-owner concurrent inserts (v3.3.1 §C.3)")
+	}
+	if !strings.Contains(body, "owner_uid=?") {
+		t.Errorf("insertUpgradeTask lock + count must reference owner_uid (v3.3.1 §C.3)")
 	}
 }
 

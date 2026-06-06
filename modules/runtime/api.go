@@ -190,18 +190,20 @@ func (rt *Runtime) register(c *wkhttp.Context) {
 		})
 
 		// 插件升级关单：用本次 upsert 返回的 id + 插件版本，匹配任务 metadata.runtime_id
+		// v3.3.1 §C.2: pass spaceID + ownerUID so a cross-owner daemon_id
+		// collision can't complete the wrong owner's upgrade task.
 		for _, p := range r.Plugins {
 			if p.Name != "" && p.Version != "" {
-				rt.db.completeUpgradeIfMatchedWithRuntime(req.DaemonID, p.Name, p.Version, id)
+				rt.db.completeUpgradeIfMatchedWithRuntime(req.DaemonID, spaceID, ownerUID, p.Name, p.Version, id)
 			}
 		}
 
 		// Provider 组件升级关单（claude/codex/openclaw/hermes）：
-		// 按 daemon_id + provider + version + runtime_id 匹配。runtime.version 即 detected CLI 版本。
+		// 按 (space, daemon_id, owner, provider, version, runtime_id) 匹配.
 		// 服务端 createComponentUpgradeTask 只允许 providerComponents 白名单创建任务，
 		// 这里无需再次白名单过滤：非白名单 provider 根本不会有对应 in-progress 任务可以关。
 		if r.Version != "" {
-			rt.db.completeUpgradeIfMatchedWithRuntime(req.DaemonID, r.Type, r.Version, id)
+			rt.db.completeUpgradeIfMatchedWithRuntime(req.DaemonID, spaceID, ownerUID, r.Type, r.Version, id)
 		}
 	}
 
@@ -211,9 +213,11 @@ func (rt *Runtime) register(c *wkhttp.Context) {
 		zap.Int("runtime_count", len(registered)),
 	)
 
-	// 升级关单：注册成功后检查是否有匹配的升级任务
+	// 升级关单：注册成功后检查是否有匹配的升级任务. v3.3.1 §C.2: scoped
+	// by (space, owner) so cross-owner same-daemon_id can't complete
+	// another owner's daemon-cli upgrade.
 	if req.CLIVersion != "" {
-		rt.db.completeUpgradeIfMatched(req.DaemonID, "octo-daemon", req.CLIVersion)
+		rt.db.completeUpgradeIfMatched(req.DaemonID, spaceID, ownerUID, "octo-daemon", req.CLIVersion)
 	}
 
 	c.Response(gin.H{
@@ -566,6 +570,7 @@ func (rt *Runtime) pingInit(c *wkhttp.Context) {
 		ID:       pingID,
 		DaemonID: req.DaemonID,
 		SpaceID:  req.SpaceID,
+		OwnerUID: loginUID, // v3.3.1 §C.1: persist owner so claim/get can scope by it
 		ServerTS: time.Now().UnixMilli(),
 		Status:   "pending",
 	}
@@ -640,22 +645,16 @@ func (rt *Runtime) pingGet(c *wkhttp.Context) {
 		c.ResponseErrorWithStatus(errors.New("no permission"), 403)
 		return
 	}
-	// v3 §4.6 (yujiawei P1): the prior `SELECT owner_uid ... LIMIT 1`
-	// with no ORDER BY was non-deterministic across the (space_id,
-	// daemon_id, provider) unique key — if two owners shared (space,
-	// daemon) with different provider rows, MySQL returned a random
-	// row, producing flaky 403s for the legitimate owner and an
-	// unreliable guard. Aligned with pingInit / claimPendingPing: bind
-	// the existence check to caller via SQL filter, count rows instead
-	// of pulling owner_uid then comparing.
-	//
-	// fail-secure: zero count → no permission, same as 404 for the
-	// caller (no info leak about whether the daemon belongs to anyone).
-	var n int
-	if err := rt.db.session.SelectBySql(
-		`SELECT COUNT(*) FROM agent_runtime WHERE space_id=? AND daemon_id=? AND owner_uid=?`,
-		entry.SpaceID, entry.DaemonID, loginUID,
-	).LoadOne(&n); err != nil || n == 0 {
+	// v3.3.1 §C.1 (Jerry-Xin Critical, three-round): the ping row now
+	// carries its own owner_uid (runtime-20260606-02 schema migration),
+	// so the ownership check is a direct field compare — no JOIN through
+	// agent_runtime, no risk of resolving the wrong owner's row on a
+	// cross-owner daemon_id collision (the v3 §4.6 COUNT-WHERE-agent_runtime
+	// approach was a step in the right direction but the data model
+	// gap — runtime_ping without owner_uid — still let a collision
+	// produce inconsistent answers depending on which row got returned).
+	// Direct compare also saves one query per ping read.
+	if entry.OwnerUID != loginUID {
 		c.ResponseErrorWithStatus(errors.New("no permission"), 403)
 		return
 	}
