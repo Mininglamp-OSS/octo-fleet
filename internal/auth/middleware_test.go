@@ -161,3 +161,106 @@ func TestMatchesSpace(t *testing.T) {
 	r.ServeHTTP(w, req)
 	require.Equal(t, 200, w.Code)
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// v2 鉴权关系数据补全 — cross-space regression tests
+// ─────────────────────────────────────────────────────────────────────
+
+// newCtxMockSrv returns a mock server that responds to verify with the
+// v2 spaces/owned_bots_by_space fields. Lets us exercise the wrapper's
+// X-Space-Id-against-spaces check without spinning up real octo-server.
+func newCtxMockSrv(spaces []string) *mockSrv {
+	m := &mockSrv{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/auth/verify", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&m.userCalls, 1)
+		// Confirm middleware passed ?include=context (else the new fields
+		// would be wasted upstream work).
+		if r.URL.Query().Get("include") != "context" {
+			http.Error(w, "missing include=context", http.StatusBadRequest)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(verifyTokenResp{
+			UID:    "u_session",
+			Name:   "User",
+			Role:   "member",
+			Spaces: spaces,
+		})
+	})
+	m.Server = httptest.NewServer(mux)
+	return m
+}
+
+// CORE CROSS-SPACE TEST. Reviewer fleet#24 P1: pre-v2 a caller could
+// spoof X-Space-Id: B to read SpaceB's bot inventory even when their
+// session token was issued for SpaceA. After v2 the wrapper validates
+// the header against server-validated spaces and rejects.
+func TestMiddleware_Session_XSpaceID_RejectedWhenNotMember(t *testing.T) {
+	// Mock server returns the session user as a member of space-A only.
+	srv := newCtxMockSrv([]string{"space-A"})
+	defer srv.Close()
+	wk := newTestWk(srv.URL, "web")
+
+	// Attacker requests with X-Space-Id pointing at space-B (not a member).
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/v1/probe", nil)
+	req.Header.Set("token", "session_xxx")
+	req.Header.Set("X-Space-Id", "space-B") // ← spoof
+	wk.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusForbidden, w.Code,
+		"wrapper must reject X-Space-Id not in server-validated spaces; body=%s", w.Body.String())
+}
+
+// Positive control: when X-Space-Id IS in the verified spaces list the
+// wrapper lets it through (regression guard for over-tightening).
+func TestMiddleware_Session_XSpaceID_AcceptedWhenMember(t *testing.T) {
+	srv := newCtxMockSrv([]string{"space-A", "space-C"})
+	defer srv.Close()
+	wk := newTestWk(srv.URL, "web")
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/v1/probe", nil)
+	req.Header.Set("token", "session_xxx")
+	req.Header.Set("X-Space-Id", "space-C") // ← legit member
+	wk.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	var resp map[string]interface{}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "space-C", resp["space_id"], "verified space must be injected into ctx")
+}
+
+// Backward-compat: when server pre-dates v2 (no spaces in response) the
+// wrapper falls back to trusting X-Space-Id so a rolling upgrade window
+// doesn't hard-fail. Once server >= v2 is everywhere this fallback can be
+// tightened to "always reject if spaces missing", but for now keep it
+// permissive — and explicitly document it via this test.
+func TestMiddleware_Session_PreV2Server_XSpaceID_Trusted(t *testing.T) {
+	// Mock server returns NO spaces field (pre-v2 server). Wrapper should
+	// still set space_id from header for backward compat.
+	srv := &mockSrv{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/auth/verify", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&srv.userCalls, 1)
+		_ = json.NewEncoder(w).Encode(verifyTokenResp{
+			UID: "u_prev2", Name: "User", Role: "member",
+			// No Spaces — simulating pre-v2 server.
+		})
+	})
+	srv.Server = httptest.NewServer(mux)
+	defer srv.Close()
+	wk := newTestWk(srv.URL, "web")
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/v1/probe", nil)
+	req.Header.Set("token", "session_xxx")
+	req.Header.Set("X-Space-Id", "space-whatever")
+	wk.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code,
+		"pre-v2 server response must not break: wrapper falls back to trusting header")
+	var resp map[string]interface{}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "space-whatever", resp["space_id"])
+}
