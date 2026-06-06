@@ -183,11 +183,24 @@ func (d *runtimeDB) insertPing(p *pingEntry) error {
 
 // claimPendingPing atomically claims a pending ping by setting status to 'dispatched'.
 // Returns the claimed ping entry, or nil if none pending.
-func (d *runtimeDB) claimPendingPing(spaceID, daemonID string, dispatchTS int64) (*pingEntry, error) {
+//
+// owner_uid filter (defense-in-depth, reviewer fleet#24 Jerry-Xin): same-space
+// daemon_id collision across owners is possible because register accepts
+// caller-supplied daemon_id with no cross-owner uniqueness constraint. Without
+// this filter, user B's heartbeat could claim a ping that server dispatched
+// for user A's daemon (same daemon_id, same space). EXISTS sub-query ties the
+// claim to the calling owner's runtime row.
+func (d *runtimeDB) claimPendingPing(spaceID, daemonID, ownerUID string, dispatchTS int64) (*pingEntry, error) {
 	// Atomic: only one heartbeat can claim each ping
 	result, err := d.session.UpdateBySql(
-		`UPDATE runtime_ping SET status='dispatched', server_ts=? WHERE space_id=? AND daemon_id=? AND status='pending' ORDER BY created_at DESC LIMIT 1`,
-		dispatchTS, spaceID, daemonID,
+		`UPDATE runtime_ping SET status='dispatched', server_ts=?
+		 WHERE space_id=? AND daemon_id=? AND status='pending'
+		   AND EXISTS (SELECT 1 FROM agent_runtime ar
+		               WHERE ar.space_id=runtime_ping.space_id
+		                 AND ar.daemon_id=runtime_ping.daemon_id
+		                 AND ar.owner_uid=?)
+		 ORDER BY created_at DESC LIMIT 1`,
+		dispatchTS, spaceID, daemonID, ownerUID,
 	).Exec()
 	if err != nil {
 		return nil, err

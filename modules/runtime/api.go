@@ -254,7 +254,7 @@ func (rt *Runtime) heartbeat(c *wkhttp.Context) {
 
 	// Atomically claim a pending ping for this daemon (prevents duplicate dispatch)
 	resp := gin.H{"status": "ok"}
-	claimedPing, _ := rt.db.claimPendingPing(spaceID, existing.DaemonID, time.Now().UnixMilli())
+	claimedPing, _ := rt.db.claimPendingPing(spaceID, existing.DaemonID, ownerUID, time.Now().UnixMilli())
 	if claimedPing != nil {
 		resp["pending_ping"] = gin.H{
 			"ping_id": claimedPing.ID,
@@ -262,7 +262,7 @@ func (rt *Runtime) heartbeat(c *wkhttp.Context) {
 	}
 
 	// Atomically claim a pending upgrade task
-	claimedUpgrade, _ := rt.db.claimPendingUpgrade(spaceID, existing.DaemonID)
+	claimedUpgrade, _ := rt.db.claimPendingUpgrade(spaceID, existing.DaemonID, ownerUID)
 	if claimedUpgrade != nil {
 		resp["pending_upgrade"] = gin.H{
 			"task_id":        claimedUpgrade.ID,
@@ -277,7 +277,7 @@ func (rt *Runtime) heartbeat(c *wkhttp.Context) {
 	// Atomically claim a pending bot.provision command for this daemon.
 	// PoC4: single composite command replaces PoC1's two-step agent.create
 	// + bot.add cycle.
-	claimedBot, _ := rt.db.claimPendingBotProvision(existing.DaemonID)
+	claimedBot, _ := rt.db.claimPendingBotProvision(existing.DaemonID, ownerUID)
 	if claimedBot != nil {
 		resp["pending_command"] = rt.buildPendingBotProvision(claimedBot)
 	}

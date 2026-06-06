@@ -179,7 +179,7 @@ func (d *runtimeDB) listBotsBySpace(spaceID, ownerUID, runtimeKind string) ([]*b
 
 // claimPendingBotProvision picks one bot_minted openclaw row for this
 // daemon, marks dispatched + sets claim_token, returns it.
-func (d *runtimeDB) claimPendingBotProvision(daemonID string) (*botModel, error) {
+func (d *runtimeDB) claimPendingBotProvision(daemonID, ownerUID string) (*botModel, error) {
 	tx, err := d.session.Begin()
 	if err != nil {
 		return nil, err
@@ -187,11 +187,16 @@ func (d *runtimeDB) claimPendingBotProvision(daemonID string) (*botModel, error)
 	defer tx.RollbackUnlessCommitted()
 
 	var m botModel
+	// owner_uid filter (reviewer fleet#24 Jerry-Xin): bot table has
+	// owner_uid; without this filter user B could claim a bot provision
+	// row that was inserted for user A's daemon (same daemon_id, same
+	// space) since register accepts caller-supplied daemon_id and bot
+	// inserts go by daemon_id alone in older paths.
 	count, err := tx.SelectBySql(
 		"SELECT "+botSelectColumns+` FROM bot
-		 WHERE daemon_id=? AND runtime_kind=? AND status=?
+		 WHERE daemon_id=? AND owner_uid=? AND runtime_kind=? AND status=?
 		 ORDER BY id ASC LIMIT 1 FOR UPDATE`,
-		daemonID, runtimeKindOpenclaw, botStatusBotMinted,
+		daemonID, ownerUID, runtimeKindOpenclaw, botStatusBotMinted,
 	).Load(&m)
 	if err != nil || count == 0 {
 		return nil, err
@@ -405,7 +410,14 @@ func (rt *Runtime) listBots(c *wkhttp.Context) {
 		return
 	}
 	loginUID := c.GetLoginUID()
-	// FLEET MIGRATION: trust JWT.space_id (was space_member lookup)
+	// v2 鉴权关系数据补全: MatchesSpace compares ?space_id against the
+	// ctx space_id that the wrapper injected from X-Space-Id. The wrapper
+	// itself already validated X-Space-Id against server-validated spaces
+	// (auth/middleware.go Middleware()), so MatchesSpace returning true
+	// here means the caller really is a member of `spaceID`. Pre-v2 fleet
+	// did not have that check and was vulnerable to cross-space enumeration
+	// (reviewer P1 fleet#24); the wrapper closes that hole, and this check
+	// stays as defense-in-depth.
 	if !auth.MatchesSpace(c, spaceID) {
 		c.ResponseErrorWithStatus(errors.New("not a space member"), http.StatusForbidden)
 		return

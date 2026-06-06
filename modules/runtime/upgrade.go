@@ -517,7 +517,7 @@ func validTransitionsFrom(component, target string) []string {
 // DB operations for upgrade
 
 // claim：去掉 component 过滤，同 daemon_id 下取最新 pending task
-func (d *runtimeDB) claimPendingUpgrade(spaceID, daemonID string) (*upgradeTask, error) {
+func (d *runtimeDB) claimPendingUpgrade(spaceID, daemonID, ownerUID string) (*upgradeTask, error) {
 	tx, err := d.session.Begin()
 	if err != nil {
 		return nil, err
@@ -525,12 +525,17 @@ func (d *runtimeDB) claimPendingUpgrade(spaceID, daemonID string) (*upgradeTask,
 	defer tx.RollbackUnlessCommitted()
 
 	var task upgradeTask
+	// owner_uid filter (reviewer fleet#24 Jerry-Xin): runtime_upgrade_task
+	// already carries owner_uid; the previous query relied on
+	// (space_id, daemon_id) alone which is vulnerable to same-space
+	// cross-owner daemon_id collisions (register allows caller-supplied
+	// daemon_id without uniqueness).
 	_, err = tx.SelectBySql(
 		`SELECT id, space_id, daemon_id, owner_uid, component, from_version, to_version, download_url, checksum, COALESCE(metadata,'') as metadata, status
 		 FROM runtime_upgrade_task
-		 WHERE space_id=? AND daemon_id=? AND status='pending'
+		 WHERE space_id=? AND daemon_id=? AND owner_uid=? AND status='pending'
 		 ORDER BY created_at DESC LIMIT 1 FOR UPDATE`,
-		spaceID, daemonID,
+		spaceID, daemonID, ownerUID,
 	).Load(&task)
 	if err != nil {
 		return nil, err
