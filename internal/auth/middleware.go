@@ -51,6 +51,12 @@ type verifyTokenResp struct {
 	Name      string     `json:"name"`
 	Role      string     `json:"role"`
 	OwnedBots []ownedBot `json:"owned_bots"`
+
+	// v2 鉴权关系数据补全: populated by server when middleware passes
+	// ?include=context. Empty/nil when caller did not opt-in or server
+	// version pre-dates v2.
+	Spaces           []string            `json:"spaces,omitempty"`
+	OwnedBotsBySpace map[string][]string `json:"owned_bots_by_space,omitempty"`
 }
 
 type verifyBotResp struct {
@@ -62,11 +68,14 @@ type verifyBotResp struct {
 }
 
 // verifyAPIKeyResp mirrors POST /v1/auth/verify-api-key on server
-// (合并 plan §3). The endpoint only returns the user + bound space —
-// daemon-facing handlers derive everything else from owner_uid filtering.
+// (合并 plan §3). The endpoint returns the user + bound space; when
+// middleware passes ?include=context the response also carries owned_bots
+// keyed by space (always a single-key map for api_key — it's bound to
+// exactly one space).
 type verifyAPIKeyResp struct {
-	UID     string `json:"uid"`
-	SpaceID string `json:"space_id"`
+	UID       string              `json:"uid"`
+	SpaceID   string              `json:"space_id"`
+	OwnedBots map[string][]string `json:"owned_bots,omitempty"`
 }
 
 // AuthMiddleware authenticates requests by calling octoim's verify API.
@@ -183,20 +192,15 @@ func handleUserAuth(c *gin.Context, client *http.Client, baseURL, token string, 
 	// Check cache
 	if cached, ok := cache.get("user:" + token); ok {
 		result := cached.(*verifyTokenResp)
-		c.Set("uid", result.UID)
-		c.Set("name", result.Name)
-		c.Set("role", result.Role)
-		c.Set("auth_kind", AuthKindSession)
-		relatedUIDs := []string{result.UID}
-		for _, bot := range result.OwnedBots {
-			relatedUIDs = append(relatedUIDs, bot.UID)
-		}
-		c.Set("related_uids", relatedUIDs)
+		applyUserResult(c, result)
 		return
 	}
 
 	body, _ := json.Marshal(map[string]string{"token": token})
-	resp, err := client.Post(baseURL+"/v1/auth/verify", "application/json", bytes.NewReader(body))
+	// ?include=context asks server for spaces + owned_bots_by_space so the
+	// handler layer can enforce X-Space-Id membership + bot ownership
+	// against server-validated data instead of client-supplied headers.
+	resp, err := client.Post(baseURL+"/v1/auth/verify?include=context", "application/json", bytes.NewReader(body))
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
 			"error": gin.H{"code": "AUTH_UNAVAILABLE", "message": "failed to reach auth service"},
@@ -221,6 +225,15 @@ func handleUserAuth(c *gin.Context, client *http.Client, baseURL, token string, 
 		return
 	}
 
+	applyUserResult(c, &result)
+	cache.set("user:"+token, &result, 60*time.Second)
+}
+
+// applyUserResult injects verified user context into gin ctx. Mirrors the
+// shape used by both the cache-hit and fresh-fetch paths so they stay in
+// sync (subtle bugs from forgetting to update one side were the original
+// cause of issue #75-class regressions).
+func applyUserResult(c *gin.Context, result *verifyTokenResp) {
 	c.Set("uid", result.UID)
 	c.Set("name", result.Name)
 	c.Set("role", result.Role)
@@ -232,9 +245,17 @@ func handleUserAuth(c *gin.Context, client *http.Client, baseURL, token string, 
 	}
 	c.Set("related_uids", relatedUIDs)
 
-	// Cache for 60s
-	cache.set("user:"+token, &result, 60*time.Second)
-
+	// v2 context fields: spaces + owned_bots_by_space. Handlers use these
+	// to validate X-Space-Id against server-validated membership and to
+	// enforce per-bot ownership without trusting client input. When server
+	// pre-dates v2 these come back nil/empty — handlers should treat that
+	// as "no access" rather than "skip the check".
+	if len(result.Spaces) > 0 {
+		c.Set("spaces", result.Spaces)
+	}
+	if len(result.OwnedBotsBySpace) > 0 {
+		c.Set("owned_bots_by_space", result.OwnedBotsBySpace)
+	}
 }
 
 func handleBotAuth(c *gin.Context, client *http.Client, baseURL, botToken string, cache *verifyCache) {
@@ -324,7 +345,10 @@ func handleAPIKeyAuth(c *gin.Context, client *http.Client, baseURL, apiKey strin
 	}
 
 	body, _ := json.Marshal(map[string]string{"api_key": apiKey})
-	resp, err := client.Post(baseURL+"/v1/auth/verify-api-key", "application/json", bytes.NewReader(body))
+	// ?include=context asks server for owned_bots map (single-key for the
+	// api_key's bound space) so handlers can enforce per-bot ownership
+	// without a separate query.
+	resp, err := client.Post(baseURL+"/v1/auth/verify-api-key?include=context", "application/json", bytes.NewReader(body))
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
 			"error": gin.H{"code": "AUTH_UNAVAILABLE", "message": "failed to reach auth service"},
@@ -358,6 +382,12 @@ func applyAPIKeyResult(c *gin.Context, r *verifyAPIKeyResp) {
 	c.Set("uid", r.UID)
 	c.Set("space_id", r.SpaceID)
 	c.Set("auth_kind", AuthKindAPIKey)
+	// v2: owned_bots map (single-key for api_key path — api_key is bound
+	// to exactly one space). Handlers use this to enforce per-bot
+	// ownership without trusting client input.
+	if len(r.OwnedBots) > 0 {
+		c.Set("owned_bots_by_space", r.OwnedBots)
+	}
 }
 
 // RequireKind enforces that the authenticated caller's auth_kind matches
@@ -445,10 +475,40 @@ func Middleware(scope string) wkhttp.HandlerFunc {
 			return
 		}
 		// session 路径补 space_id (api_key/bot 路径已由 AuthMiddleware 注入).
+		//
+		// v2: when the verify response carried server-validated `spaces`
+		// (server >= v2), validate the client-supplied X-Space-Id against
+		// that set rather than trusting it blindly. Pre-v2 server (no
+		// `spaces` in response) → fall back to the original "trust the
+		// header" behavior so partial deploys don't break. Reviewer-flagged
+		// cross-space attack (fleet #24 P1) is closed by the membership
+		// check; the fallback keeps us from hard-failing during a rolling
+		// upgrade window.
 		if _, exists := c.Get("space_id"); !exists {
-			if sid := c.GetHeader("X-Space-Id"); sid != "" {
-				c.Set("space_id", sid)
+			sid := c.GetHeader("X-Space-Id")
+			if sid == "" {
+				return
 			}
+			if spacesRaw, hasSpaces := c.Get("spaces"); hasSpaces {
+				spaces, _ := spacesRaw.([]string)
+				allowed := false
+				for _, s := range spaces {
+					if s == sid {
+						allowed = true
+						break
+					}
+				}
+				if !allowed {
+					c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+						"error": gin.H{
+							"code":    "FORBIDDEN",
+							"message": "X-Space-Id not in caller's space membership",
+						},
+					})
+					return
+				}
+			}
+			c.Set("space_id", sid)
 		}
 	}
 }
