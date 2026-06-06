@@ -281,7 +281,7 @@ func (rt *Runtime) heartbeat(c *wkhttp.Context) {
 	// Atomically claim a pending bot.provision command for this daemon.
 	// PoC4: single composite command replaces PoC1's two-step agent.create
 	// + bot.add cycle.
-	claimedBot, _ := rt.db.claimPendingBotProvision(existing.DaemonID, ownerUID)
+	claimedBot, _ := rt.db.claimPendingBotProvision(existing.DaemonID, existing.SpaceID, ownerUID)
 	if claimedBot != nil {
 		resp["pending_command"] = rt.buildPendingBotProvision(claimedBot)
 	}
@@ -601,6 +601,20 @@ func (rt *Runtime) pingReport(c *wkhttp.Context) {
 	ownerUID := c.MustGet("uid").(string)
 	apiSpaceID := c.MustGet("space_id").(string)
 	if entry.SpaceID != apiSpaceID {
+		c.ResponseErrorWithStatus(errors.New("no permission"), 403)
+		return
+	}
+	// v3.3.2 #2 (Jerry-Xin three-round P0): runtime_ping now carries its
+	// own owner_uid (runtime-20260606-02 migration), so reject when the
+	// row's owner doesn't match the caller. The agent_runtime EXISTS
+	// check below is necessary but not sufficient: after the 4-tuple
+	// unique key two owners can legitimately share (space, daemon),
+	// so EXISTS would pass for the wrong owner if they knew or guessed
+	// the ping id. Direct ping.owner_uid compare is the authoritative
+	// gate; the agent_runtime check stays as defense-in-depth (catches
+	// stale runtime rows / future bugs that miss the ping owner_uid
+	// plumbing). Symmetric with pingGet's v3.3.1 §C.1 (e) fix.
+	if entry.OwnerUID != ownerUID {
 		c.ResponseErrorWithStatus(errors.New("no permission"), 403)
 		return
 	}

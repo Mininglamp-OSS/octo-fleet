@@ -188,7 +188,7 @@ func (d *runtimeDB) listBotsBySpace(spaceID, ownerUID, runtimeKind string) ([]*b
 
 // claimPendingBotProvision picks one bot_minted openclaw row for this
 // daemon, marks dispatched + sets claim_token, returns it.
-func (d *runtimeDB) claimPendingBotProvision(daemonID, ownerUID string) (*botModel, error) {
+func (d *runtimeDB) claimPendingBotProvision(daemonID, spaceID, ownerUID string) (*botModel, error) {
 	tx, err := d.session.Begin()
 	if err != nil {
 		return nil, err
@@ -196,16 +196,20 @@ func (d *runtimeDB) claimPendingBotProvision(daemonID, ownerUID string) (*botMod
 	defer tx.RollbackUnlessCommitted()
 
 	var m botModel
-	// owner_uid filter (reviewer fleet#24 Jerry-Xin): bot table has
-	// owner_uid; without this filter user B could claim a bot provision
-	// row that was inserted for user A's daemon (same daemon_id, same
-	// space) since register accepts caller-supplied daemon_id and bot
-	// inserts go by daemon_id alone in older paths.
+	// (owner_uid, space_id) filter (reviewer fleet#24 Jerry-Xin three-
+	// round): bot table has owner_uid + space_id; without both filters
+	// user B could claim a bot provision row that was inserted for user
+	// A's daemon (same daemon_id, same space), OR a daemon in Space B
+	// could claim a bot provision row from Space A for the same owner —
+	// both legal collision shapes after runtime-20260606-01 4-tuple
+	// unique key. v3 §4.3 added owner_uid; v3.3.2 #1 closes the missing
+	// space_id dimension (api_keys are space-bound, so a same-owner
+	// cross-space daemon is a valid collision target).
 	count, err := tx.SelectBySql(
 		"SELECT "+botSelectColumns+` FROM bot
-		 WHERE daemon_id=? AND owner_uid=? AND runtime_kind=? AND status=?
+		 WHERE daemon_id=? AND owner_uid=? AND space_id=? AND runtime_kind=? AND status=?
 		 ORDER BY id ASC LIMIT 1 FOR UPDATE`,
-		daemonID, ownerUID, runtimeKindOpenclaw, botStatusBotMinted,
+		daemonID, ownerUID, spaceID, runtimeKindOpenclaw, botStatusBotMinted,
 	).Load(&m)
 	if err != nil || count == 0 {
 		return nil, err

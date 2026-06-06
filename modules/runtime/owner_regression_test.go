@@ -123,6 +123,13 @@ func TestClaimPendingBotProvision_OwnerFilterRegressionNet(t *testing.T) {
 	src := mustReadSource(t, "bot.go")
 	body := extractFuncBody(t, src, "claimPendingBotProvision")
 	assertHasOwnerUIDFilter(t, "claimPendingBotProvision", body)
+	// v3.3.2 #1: space_id scope was added after Jerry-Xin's three-round
+	// review caught that owner_uid alone wasn't enough — a same-owner
+	// cross-space daemon_id collision (legal after runtime-20260606-01)
+	// could let a Space-B daemon claim a Space-A bot provision payload.
+	if !strings.Contains(body, "space_id=?") {
+		t.Errorf("claimPendingBotProvision must scope by space_id=? (v3.3.2 #1, paired with owner_uid)")
+	}
 }
 
 // pingGet's owner check shifted across two rounds:
@@ -142,12 +149,26 @@ func TestPingGet_OwnerFilterRegressionNet(t *testing.T) {
 	}
 }
 
-// v3.3.1 §C.1 (Jerry-Xin Critical 1 三审): runtime_ping inserts and
-// claim/select queries must persist + filter owner_uid since the column
-// was added in runtime-20260606-02. Without these, schema migration
-// 20260606-01 (agent_runtime 4-tuple unique key allowing cross-owner
-// daemon_id sharing) leaves runtime_ping's queries to ambiguously
-// resolve which owner owns a given (space, daemon) ping row.
+// v3.3.2 #2 (Jerry-Xin three-round P0): pingReport must compare
+// entry.OwnerUID directly (using the new runtime_ping.owner_uid column
+// from runtime-20260606-02) — symmetric with pingGet's §C.1 (e) fix.
+// The agent_runtime EXISTS check alone isn't sufficient under the
+// post-§4.4 schema where two owners can legitimately share (space,
+// daemon_id).
+func TestPingReport_OwnerCheckRegressionNet(t *testing.T) {
+	src := mustReadSource(t, "api.go")
+	body := extractFuncBody(t, src, "pingReport")
+	if !strings.Contains(body, "entry.OwnerUID != ownerUID") {
+		t.Errorf("pingReport must compare entry.OwnerUID against ownerUID directly (v3.3.2 #2); body:\n%s", body)
+	}
+}
+
+// v3.3.1 §C.1 (Jerry-Xin Critical 1 三审): runtime_ping inserts +
+// claim/select queries must persist and filter owner_uid since the
+// column was added in runtime-20260606-02. Without these, schema
+// migration 20260606-01 (agent_runtime 4-tuple unique key allowing
+// cross-owner daemon_id sharing) leaves runtime_ping's queries to
+// ambiguously resolve which owner owns a given (space, daemon) ping row.
 func TestInsertPing_PersistsOwnerUIDRegressionNet(t *testing.T) {
 	src := mustReadSource(t, "db.go")
 	body := extractFuncBody(t, src, "insertPing")
