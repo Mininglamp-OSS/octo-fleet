@@ -43,7 +43,7 @@ func (d *runtimeDB) upsert(m *agentRuntimeModel) (int64, error) {
 		return 0, err
 	}
 	if id == 0 {
-		existing, err := d.queryByUniqueKey(m.SpaceID, m.DaemonID, m.Provider)
+		existing, err := d.queryByUniqueKey(m.SpaceID, m.DaemonID, m.Provider, m.OwnerUID)
 		if err != nil {
 			return 0, err
 		}
@@ -54,10 +54,13 @@ func (d *runtimeDB) upsert(m *agentRuntimeModel) (int64, error) {
 	return id, nil
 }
 
-func (d *runtimeDB) queryByUniqueKey(spaceID, daemonID, provider string) (*agentRuntimeModel, error) {
+// queryByUniqueKey looks up the agent_runtime row by the 4-tuple unique
+// key (v3 §4.4: owner_uid added to the key so two owners sharing a
+// daemon_id in the same space don't collide).
+func (d *runtimeDB) queryByUniqueKey(spaceID, daemonID, provider, ownerUID string) (*agentRuntimeModel, error) {
 	var m *agentRuntimeModel
 	_, err := d.session.Select("*").From("agent_runtime").
-		Where("space_id=? AND daemon_id=? AND provider=?", spaceID, daemonID, provider).
+		Where("space_id=? AND daemon_id=? AND provider=? AND owner_uid=?", spaceID, daemonID, provider, ownerUID).
 		Load(&m)
 	return m, err
 }
@@ -324,9 +327,16 @@ func (d *runtimeDB) queryBotInfoByUIDsLegacy(spaceID string, uids []string) (map
 }
 
 // listActiveBotsForDaemon returns bot_uid + workspace_id for every active
-// bot whose runtime is hosted by this daemon. Daemon iterates the list on
-// each heartbeat to pull tasks for each bot from matter.
-func (d *runtimeDB) listActiveBotsForDaemon(daemonID string) ([]struct {
+// bot whose runtime is hosted by this daemon, scoped to (space, owner).
+//
+// v3 §4.3 (Jerry-Xin Critical 1): the prior (daemonID-only) signature
+// joined bots across owners — same space + same daemon_id (allowed by
+// register's non-unique (space,daemon_id,provider) key pre-§4.4) could
+// surface another owner's active bot inventory (bot_uid + workspace_id
+// leak). Scoping by (space, owner) closes that without changing the
+// heartbeat happy-path. Caller (heartbeat) already has both values from
+// the agent_runtime row it just loaded — no N+1.
+func (d *runtimeDB) listActiveBotsForDaemon(daemonID, spaceID, ownerUID string) ([]struct {
 	BotUID      string `json:"bot_uid" db:"bot_uid"`
 	WorkspaceID string `json:"workspace_id" db:"workspace_id"`
 }, error) {
@@ -338,8 +348,9 @@ func (d *runtimeDB) listActiveBotsForDaemon(daemonID string) ([]struct {
 	_, err := d.session.SelectBySql(
 		`SELECT b.bot_uid, b.workspace_id
 		   FROM bot b
-		  WHERE b.daemon_id=? AND b.status='active' AND b.bot_uid!=''`,
-		daemonID,
+		  WHERE b.daemon_id=? AND b.space_id=? AND b.owner_uid=?
+		    AND b.status='active' AND b.bot_uid!=''`,
+		daemonID, spaceID, ownerUID,
 	).Load(&rows)
 	if err != nil {
 		return nil, err

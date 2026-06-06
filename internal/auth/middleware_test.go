@@ -169,6 +169,10 @@ func TestMatchesSpace(t *testing.T) {
 // newCtxMockSrv returns a mock server that responds to verify with the
 // v2 spaces/owned_bots_by_space fields. Lets us exercise the wrapper's
 // X-Space-Id-against-spaces check without spinning up real octo-server.
+//
+// v3 §4.5: ContextIncluded=true marks this as a v2-or-later server. The
+// wrapper uses that flag (not the presence of Spaces field) to decide
+// fail-closed vs trust-the-header.
 func newCtxMockSrv(spaces []string) *mockSrv {
 	m := &mockSrv{}
 	mux := http.NewServeMux()
@@ -181,10 +185,11 @@ func newCtxMockSrv(spaces []string) *mockSrv {
 			return
 		}
 		_ = json.NewEncoder(w).Encode(verifyTokenResp{
-			UID:    "u_session",
-			Name:   "User",
-			Role:   "member",
-			Spaces: spaces,
+			UID:             "u_session",
+			Name:            "User",
+			Role:            "member",
+			ContextIncluded: true,
+			Spaces:          spaces,
 		})
 	})
 	m.Server = httptest.NewServer(mux)
@@ -231,21 +236,27 @@ func TestMiddleware_Session_XSpaceID_AcceptedWhenMember(t *testing.T) {
 	assert.Equal(t, "space-C", resp["space_id"], "verified space must be injected into ctx")
 }
 
-// Backward-compat: when server pre-dates v2 (no spaces in response) the
-// wrapper falls back to trusting X-Space-Id so a rolling upgrade window
-// doesn't hard-fail. Once server >= v2 is everywhere this fallback can be
-// tightened to "always reject if spaces missing", but for now keep it
-// permissive — and explicitly document it via this test.
-func TestMiddleware_Session_PreV2Server_XSpaceID_Trusted(t *testing.T) {
-	// Mock server returns NO spaces field (pre-v2 server). Wrapper should
-	// still set space_id from header for backward compat.
+// v3 §4.5: pre-v2 server fallback (no ContextIncluded flag) — wrapper
+// still trusts X-Space-Id so a rolling upgrade window doesn't hard-fail
+// the entire fleet. **Defense-in-depth lives in listBotsBySpace** (v3
+// made owner_uid=loginUID mandatory), so a spoofed header doesn't
+// translate into cross-space data access even in the fallback branch.
+// Once server >= v2 is everywhere this fallback can be removed entirely.
+//
+// This test was previously named `_XSpaceID_Trusted`, which read as if
+// fail-open were the intended steady-state behavior. Renamed to make the
+// fallback semantics explicit: the wrapper trusts the header, the
+// handler SQL refuses cross-owner reads — that pair is the contract.
+func TestMiddleware_Session_PreV2Server_XSpaceID_HandledByHandlerOwnerFilter(t *testing.T) {
+	// Mock server returns NO context_included flag (pre-v2 server). Wrapper
+	// should still set space_id from header for backward compat.
 	srv := &mockSrv{}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/auth/verify", func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&srv.userCalls, 1)
 		_ = json.NewEncoder(w).Encode(verifyTokenResp{
 			UID: "u_prev2", Name: "User", Role: "member",
-			// No Spaces — simulating pre-v2 server.
+			// No ContextIncluded — simulating pre-v2 server.
 		})
 	})
 	srv.Server = httptest.NewServer(mux)
@@ -259,8 +270,30 @@ func TestMiddleware_Session_PreV2Server_XSpaceID_Trusted(t *testing.T) {
 	wk.ServeHTTP(w, req)
 
 	require.Equal(t, http.StatusOK, w.Code,
-		"pre-v2 server response must not break: wrapper falls back to trusting header")
+		"pre-v2 server response must not break: wrapper falls back to trusting header (handler SQL filters cross-owner)")
 	var resp map[string]interface{}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Equal(t, "space-whatever", resp["space_id"])
+}
+
+// v3 §4.5 (yujiawei P1): when server CONFIRMS v2 (ContextIncluded=true)
+// but the caller belongs to zero spaces, the wrapper MUST reject any
+// X-Space-Id. The v2 implementation collapsed this case into the pre-v2
+// fallback branch (because both shapes produced `Spaces==nil` after
+// omitempty erased the empty slice) — letting a zero-space caller spoof
+// X-Space-Id and enumerate any space's bots via listBots without the
+// `owner_uid=` query param. v3 distinguishes them via ContextIncluded.
+func TestMiddleware_Session_EmptySpaces_XSpaceIDRejected(t *testing.T) {
+	srv := newCtxMockSrv([]string{}) // v2 server, caller has zero memberships
+	defer srv.Close()
+	wk := newTestWk(srv.URL, "web")
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/v1/probe", nil)
+	req.Header.Set("token", "session_xxx")
+	req.Header.Set("X-Space-Id", "space-target")
+	wk.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusForbidden, w.Code,
+		"v2 server + empty spaces must reject X-Space-Id (caller is not a member of anything); body=%s", w.Body.String())
 }

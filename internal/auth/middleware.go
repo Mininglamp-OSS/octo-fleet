@@ -52,6 +52,13 @@ type verifyTokenResp struct {
 	Role      string     `json:"role"`
 	OwnedBots []ownedBot `json:"owned_bots"`
 
+	// v3 §4.5: explicit signal from server that ?include=context took
+	// effect (server >= v2). Distinguishes "server returned empty spaces"
+	// from "pre-v2 server omitted the field" — needed for fail-closed
+	// X-Space-Id checks (without this, both shapes look identical after
+	// Go json decode erases empty slices via omitempty).
+	ContextIncluded bool `json:"context_included"`
+
 	// v2 鉴权关系数据补全: populated by server when middleware passes
 	// ?include=context. Empty/nil when caller did not opt-in or server
 	// version pre-dates v2.
@@ -73,9 +80,11 @@ type verifyBotResp struct {
 // keyed by space (always a single-key map for api_key — it's bound to
 // exactly one space).
 type verifyAPIKeyResp struct {
-	UID       string              `json:"uid"`
-	SpaceID   string              `json:"space_id"`
-	OwnedBots map[string][]string `json:"owned_bots,omitempty"`
+	UID     string `json:"uid"`
+	SpaceID string `json:"space_id"`
+	// v3 §4.5: same signal as verifyTokenResp.
+	ContextIncluded bool                `json:"context_included"`
+	OwnedBots       map[string][]string `json:"owned_bots,omitempty"`
 }
 
 // AuthMiddleware authenticates requests by calling octoim's verify API.
@@ -245,16 +254,24 @@ func applyUserResult(c *gin.Context, result *verifyTokenResp) {
 	}
 	c.Set("related_uids", relatedUIDs)
 
-	// v2 context fields: spaces + owned_bots_by_space. Handlers use these
-	// to validate X-Space-Id against server-validated membership and to
-	// enforce per-bot ownership without trusting client input. When server
-	// pre-dates v2 these come back nil/empty — handlers should treat that
-	// as "no access" rather than "skip the check".
-	if len(result.Spaces) > 0 {
-		c.Set("spaces", result.Spaces)
-	}
-	if len(result.OwnedBotsBySpace) > 0 {
-		c.Set("owned_bots_by_space", result.OwnedBotsBySpace)
+	// v3 §4.5: ALWAYS set verify_context_included + spaces + owned map
+	// when server confirmed v2 (ContextIncluded=true), even if spaces is
+	// the empty slice. The middleware wrapper uses ContextIncluded to
+	// pick fail-closed (v2) vs trust-the-header (pre-v2) for X-Space-Id
+	// validation. Setting empty []string{} / map for v2-empty caller is
+	// distinct from leaving the keys unset for pre-v2 server.
+	if result.ContextIncluded {
+		c.Set("verify_context_included", true)
+		spaces := result.Spaces
+		if spaces == nil {
+			spaces = []string{}
+		}
+		c.Set("spaces", spaces)
+		owned := result.OwnedBotsBySpace
+		if owned == nil {
+			owned = map[string][]string{}
+		}
+		c.Set("owned_bots_by_space", owned)
 	}
 }
 
@@ -382,11 +399,21 @@ func applyAPIKeyResult(c *gin.Context, r *verifyAPIKeyResp) {
 	c.Set("uid", r.UID)
 	c.Set("space_id", r.SpaceID)
 	c.Set("auth_kind", AuthKindAPIKey)
-	// v2: owned_bots map (single-key for api_key path — api_key is bound
-	// to exactly one space). Handlers use this to enforce per-bot
-	// ownership without trusting client input.
-	if len(r.OwnedBots) > 0 {
-		c.Set("owned_bots_by_space", r.OwnedBots)
+	// v3 §4.5: api_key path is bound to exactly one space, so the
+	// X-Space-Id wrapper check doesn't apply here (space_id is already
+	// set from the verify response). But we still set the flag for
+	// downstream handlers that branch on it.
+	if r.ContextIncluded {
+		c.Set("verify_context_included", true)
+		// api_key has a single bound space; surface as []string for the
+		// same `spaces` ctx key shape that user path uses, so callers
+		// like the matter actor_uid helpers can read uniformly.
+		c.Set("spaces", []string{r.SpaceID})
+		owned := r.OwnedBots
+		if owned == nil {
+			owned = map[string][]string{}
+		}
+		c.Set("owned_bots_by_space", owned)
 	}
 }
 
@@ -476,20 +503,31 @@ func Middleware(scope string) wkhttp.HandlerFunc {
 		}
 		// session 路径补 space_id (api_key/bot 路径已由 AuthMiddleware 注入).
 		//
-		// v2: when the verify response carried server-validated `spaces`
-		// (server >= v2), validate the client-supplied X-Space-Id against
-		// that set rather than trusting it blindly. Pre-v2 server (no
-		// `spaces` in response) → fall back to the original "trust the
-		// header" behavior so partial deploys don't break. Reviewer-flagged
-		// cross-space attack (fleet #24 P1) is closed by the membership
-		// check; the fallback keeps us from hard-failing during a rolling
-		// upgrade window.
+		// v3 §4.5 (yujiawei P1, fail-closed): the v2 implementation gated
+		// the X-Space-Id check on `len(spaces) > 0` and trusted the header
+		// blindly otherwise. That collapsed two cases (v2 server returned
+		// empty spaces vs pre-v2 server omitted the field) into the same
+		// fail-open branch — listBots could enumerate any space's bots
+		// via spoofed X-Space-Id when the caller belonged to zero spaces.
+		//
+		// v3 distinguishes them via verify_context_included (set true only
+		// when server confirmed it spoke v2 contract):
+		//   - context_included=true  → MUST validate X-Space-Id ∈ spaces;
+		//                              empty spaces means caller has zero
+		//                              memberships, reject any X-Space-Id
+		//   - context_included=false → pre-v2 server; fallback to header
+		//                              trust (defense-in-depth: listBots
+		//                              SQL forces owner_uid=loginUID anyway).
 		if _, exists := c.Get("space_id"); !exists {
 			sid := c.GetHeader("X-Space-Id")
 			if sid == "" {
 				return
 			}
-			if spacesRaw, hasSpaces := c.Get("spaces"); hasSpaces {
+			ctxInclVal, _ := c.Get("verify_context_included")
+			ctxIncl, _ := ctxInclVal.(bool)
+			if ctxIncl {
+				// v2 server: hard membership check, fail-closed on empty.
+				spacesRaw, _ := c.Get("spaces")
 				spaces, _ := spacesRaw.([]string)
 				allowed := false
 				for _, s := range spaces {
@@ -499,6 +537,9 @@ func Middleware(scope string) wkhttp.HandlerFunc {
 					}
 				}
 				if !allowed {
+					// Cover both: (a) X-Space-Id is not in the verified
+					// set, (b) caller's verified set is empty (zero
+					// memberships). Same 403, no info leak.
 					c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 						"error": gin.H{
 							"code":    "FORBIDDEN",
@@ -508,6 +549,11 @@ func Middleware(scope string) wkhttp.HandlerFunc {
 					return
 				}
 			}
+			// pre-v2 fallback OR v2 with valid X-Space-Id → set space_id.
+			// Pre-v2 path is a transitional grace window for rolling
+			// upgrade; defense-in-depth lives in listBotsBySpace + sibling
+			// SQL paths which force owner_uid=loginUID irrespective of
+			// X-Space-Id trust.
 			c.Set("space_id", sid)
 		}
 	}
@@ -532,6 +578,27 @@ func scopeToKind(scope string) string {
 // verify-api-key (api_key path) or verify-bot (bot path); the user/session
 // path doesn't inject space_id by default, so user-facing handlers must
 // either trust X-Space-Id or skip this check.
+//
+// SECURITY NOTE (v3 §4.2, aunknown B2): for the session path, ctx
+// space_id is the X-Space-Id header — client-controlled. MatchesSpace
+// compares that header against the handler's spaceID parameter (also
+// from the URL query), so the call effectively asks "did the client
+// claim the same space twice?" — useful for catching typos / replay
+// noise, NOT for cross-space access control.
+//
+// Real authz on the session path comes from two layers above this:
+//  1. middleware Middleware wrapper validates X-Space-Id ∈ verified
+//     spaces from /v1/auth/verify?include=context, but ONLY when
+//     verify_context_included is true (v2 server). Pre-v2 fallback
+//     trusts the header.
+//  2. handler SQL MUST enforce owner_uid=loginUID (or equivalent
+//     tenant-bound predicate). v3 §4.5 (defense-in-depth C) made the
+//     filter mandatory in listBotsBySpace to close the cross-space
+//     enumeration that bypassed (1) during the pre-v2 fallback.
+//
+// In short: MatchesSpace is a sanity check, not a permission check.
+// A handler that relies on MatchesSpace alone for cross-space isolation
+// has a bug.
 func MatchesSpace(c *wkhttp.Context, spaceID string) bool {
 	v, ok := c.Get("space_id")
 	if !ok {

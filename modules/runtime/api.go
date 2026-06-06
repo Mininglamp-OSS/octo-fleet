@@ -285,7 +285,10 @@ func (rt *Runtime) heartbeat(c *wkhttp.Context) {
 	// PR-B.2: managed_bots tells the daemon which bots to poll from
 	// matter on this heartbeat tick. PR-B.3 dropped the legacy
 	// pending_task fallback — daemon expects matter-only dispatch now.
-	managed, mberr := rt.db.listActiveBotsForDaemon(existing.DaemonID)
+	// v3 §4.3: scoped to (existing.SpaceID, ownerUID) so a cross-owner
+	// daemon_id collision (legal until §4.4 schema migration lands) can't
+	// leak the other owner's bot inventory through this heartbeat hint.
+	managed, mberr := rt.db.listActiveBotsForDaemon(existing.DaemonID, existing.SpaceID, ownerUID)
 	if mberr != nil {
 		rt.Warn("listActiveBotsForDaemon failed", zap.Error(mberr), zap.String("daemon_id", existing.DaemonID))
 	} else if len(managed) > 0 {
@@ -637,21 +640,22 @@ func (rt *Runtime) pingGet(c *wkhttp.Context) {
 		c.ResponseErrorWithStatus(errors.New("no permission"), 403)
 		return
 	}
-	// 合并 plan 决策一+二 Phase 3B 补漏: pingGet 加 owner_uid 校验, 防止
-	// user A 拿 user B 的 ping 结果. pingEntry 表没有 owner_uid 字段, 通过
-	// daemon_id JOIN agent_runtime 反查 owner.
+	// v3 §4.6 (yujiawei P1): the prior `SELECT owner_uid ... LIMIT 1`
+	// with no ORDER BY was non-deterministic across the (space_id,
+	// daemon_id, provider) unique key — if two owners shared (space,
+	// daemon) with different provider rows, MySQL returned a random
+	// row, producing flaky 403s for the legitimate owner and an
+	// unreliable guard. Aligned with pingInit / claimPendingPing: bind
+	// the existence check to caller via SQL filter, count rows instead
+	// of pulling owner_uid then comparing.
 	//
-	// fail-secure: agent_runtime 已被清 / 查询失败时一律拒, 不放行 (避免
-	// 攻击者构造不存在的 daemon_id 绕过校验).
-	var pingOwnerUID string
+	// fail-secure: zero count → no permission, same as 404 for the
+	// caller (no info leak about whether the daemon belongs to anyone).
+	var n int
 	if err := rt.db.session.SelectBySql(
-		`SELECT owner_uid FROM agent_runtime WHERE space_id=? AND daemon_id=? LIMIT 1`,
-		entry.SpaceID, entry.DaemonID,
-	).LoadOne(&pingOwnerUID); err != nil || pingOwnerUID == "" {
-		c.ResponseErrorWithStatus(errors.New("no permission"), 403)
-		return
-	}
-	if pingOwnerUID != loginUID {
+		`SELECT COUNT(*) FROM agent_runtime WHERE space_id=? AND daemon_id=? AND owner_uid=?`,
+		entry.SpaceID, entry.DaemonID, loginUID,
+	).LoadOne(&n); err != nil || n == 0 {
 		c.ResponseErrorWithStatus(errors.New("no permission"), 403)
 		return
 	}

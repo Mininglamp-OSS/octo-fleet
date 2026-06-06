@@ -159,15 +159,24 @@ func (d *runtimeDB) queryBotByID(id int64) (*botModel, error) {
 	return &m, nil
 }
 
+// listBotsBySpace lists active bots in the given (space, owner) scope.
+// v3 §4.5 (defense-in-depth C): ownerUID is now mandatory — the prior
+// "ownerUID='' disables filter" branch was the enumeration vector via
+// listBots's `?owner_uid=` query param. Caller must always pass the
+// authenticated loginUID; pass-through of unauthenticated input is no
+// longer supported here.
 func (d *runtimeDB) listBotsBySpace(spaceID, ownerUID, runtimeKind string) ([]*botModel, error) {
+	if ownerUID == "" {
+		return nil, errors.New("listBotsBySpace: ownerUID required (v3 §4.5)")
+	}
 	q := d.session.SelectBySql(
 		"SELECT "+botSelectColumns+` FROM bot
 		 WHERE space_id=? AND status != ?
-		   AND (?='' OR owner_uid=?)
+		   AND owner_uid=?
 		   AND (?='' OR runtime_kind=?)
 		 ORDER BY id DESC LIMIT 200`,
 		spaceID, botStatusArchived,
-		ownerUID, ownerUID,
+		ownerUID,
 		runtimeKind, runtimeKind,
 	)
 	var out []*botModel
@@ -410,25 +419,28 @@ func (rt *Runtime) listBots(c *wkhttp.Context) {
 		return
 	}
 	loginUID := c.GetLoginUID()
-	// v2 鉴权关系数据补全: MatchesSpace compares ?space_id against the
-	// ctx space_id that the wrapper injected from X-Space-Id. The wrapper
-	// itself already validated X-Space-Id against server-validated spaces
-	// (auth/middleware.go Middleware()), so MatchesSpace returning true
-	// here means the caller really is a member of `spaceID`. Pre-v2 fleet
-	// did not have that check and was vulnerable to cross-space enumeration
-	// (reviewer P1 fleet#24); the wrapper closes that hole, and this check
-	// stays as defense-in-depth.
+	// v2 鉴权关系数据补全 + v3 §4.5 (defense-in-depth C): MatchesSpace
+	// compares ?space_id against the ctx space_id that the wrapper
+	// injected from X-Space-Id. The wrapper validated X-Space-Id against
+	// server-validated spaces (auth/middleware.go Middleware()) when
+	// context_included=true; on pre-v2 fallback, the wrapper trusts the
+	// header and this handler MUST NOT rely on MatchesSpace alone — hence
+	// the unconditional owner_uid=loginUID filter below.
 	if !auth.MatchesSpace(c, spaceID) {
 		c.ResponseErrorWithStatus(errors.New("not a space member"), http.StatusForbidden)
 		return
 	}
-	owner := c.Query("owner_uid")
-	if owner == "me" {
-		owner = loginUID
-	}
+	// v3 §4.5 (defense-in-depth C, yujiawei P1): owner_uid is now
+	// MANDATORY and bound to loginUID — the prior `?owner_uid=` query
+	// param + `?='' OR owner_uid=?` SQL was the attack surface that let
+	// a zero-space caller (pre-v2 fallback / future bug) enumerate
+	// another owner's bots by omitting the parameter. Sharing a space
+	// with other users no longer implies seeing their bot inventory;
+	// the team-shared-view UX moves to a future dedicated endpoint if
+	// product wants it back.
 	kind := c.Query("runtime_kind")
 
-	rows, err := rt.db.listBotsBySpace(spaceID, owner, kind)
+	rows, err := rt.db.listBotsBySpace(spaceID, loginUID, kind)
 	if err != nil {
 		rt.Error("listBots", zap.Error(err))
 		c.ResponseError(errors.New("list failed"))
