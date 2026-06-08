@@ -18,10 +18,11 @@ external:
   ip: "localhost"
   baseURL: "http://localhost:8092"
 
-# server's public key location (jwks.json) — fleet fetches once at startup.
-# When server is local for dev, point at the server URL.
+# server's base URL — fleet calls /v1/auth/verify-* to authenticate
+# user / bot / api_key callers (合并 plan 决策一+二 Phase 4).
+# Old field auth.serverJwksURL still works as fallback.
 auth:
-  serverJwksURL: "http://localhost:8090/.well-known/jwks.json"
+  octoServerURL: "http://localhost:8090"
 
 logger:
   level: 1

@@ -368,7 +368,7 @@ func (rt *Runtime) ackBotTask(c *wkhttp.Context) {
 		c.ResponseError(errors.New("bot_task not found"))
 		return
 	}
-	ownerUID := c.MustGet("owner_uid").(string)
+	ownerUID := c.MustGet("uid").(string)
 	spaceID := c.MustGet("space_id").(string)
 	if m.SpaceID != spaceID {
 		c.ResponseErrorWithStatus(errors.New("no permission"), http.StatusForbidden)

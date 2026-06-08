@@ -137,7 +137,7 @@ func (rt *Runtime) register(c *wkhttp.Context) {
 		req.HeartbeatIntervalMs = 0
 	}
 
-	ownerUID := c.MustGet("owner_uid").(string)
+	ownerUID := c.MustGet("uid").(string)
 	spaceID := c.MustGet("space_id").(string)
 
 	var registered []registeredRuntimeResp
@@ -190,18 +190,20 @@ func (rt *Runtime) register(c *wkhttp.Context) {
 		})
 
 		// 插件升级关单：用本次 upsert 返回的 id + 插件版本，匹配任务 metadata.runtime_id
+		// v3.3.1 §C.2: pass spaceID + ownerUID so a cross-owner daemon_id
+		// collision can't complete the wrong owner's upgrade task.
 		for _, p := range r.Plugins {
 			if p.Name != "" && p.Version != "" {
-				rt.db.completeUpgradeIfMatchedWithRuntime(req.DaemonID, p.Name, p.Version, id)
+				rt.db.completeUpgradeIfMatchedWithRuntime(req.DaemonID, spaceID, ownerUID, p.Name, p.Version, id)
 			}
 		}
 
 		// Provider 组件升级关单（claude/codex/openclaw/hermes）：
-		// 按 daemon_id + provider + version + runtime_id 匹配。runtime.version 即 detected CLI 版本。
+		// 按 (space, daemon_id, owner, provider, version, runtime_id) 匹配.
 		// 服务端 createComponentUpgradeTask 只允许 providerComponents 白名单创建任务，
 		// 这里无需再次白名单过滤：非白名单 provider 根本不会有对应 in-progress 任务可以关。
 		if r.Version != "" {
-			rt.db.completeUpgradeIfMatchedWithRuntime(req.DaemonID, r.Type, r.Version, id)
+			rt.db.completeUpgradeIfMatchedWithRuntime(req.DaemonID, spaceID, ownerUID, r.Type, r.Version, id)
 		}
 	}
 
@@ -211,9 +213,11 @@ func (rt *Runtime) register(c *wkhttp.Context) {
 		zap.Int("runtime_count", len(registered)),
 	)
 
-	// 升级关单：注册成功后检查是否有匹配的升级任务
+	// 升级关单：注册成功后检查是否有匹配的升级任务. v3.3.1 §C.2: scoped
+	// by (space, owner) so cross-owner same-daemon_id can't complete
+	// another owner's daemon-cli upgrade.
 	if req.CLIVersion != "" {
-		rt.db.completeUpgradeIfMatched(req.DaemonID, "octo-daemon", req.CLIVersion)
+		rt.db.completeUpgradeIfMatched(req.DaemonID, spaceID, ownerUID, "octo-daemon", req.CLIVersion)
 	}
 
 	c.Response(gin.H{
@@ -233,7 +237,7 @@ func (rt *Runtime) heartbeat(c *wkhttp.Context) {
 		return
 	}
 
-	ownerUID := c.MustGet("owner_uid").(string)
+	ownerUID := c.MustGet("uid").(string)
 	spaceID := c.MustGet("space_id").(string)
 
 	existing, err := rt.db.queryByID(req.RuntimeID)
@@ -254,7 +258,7 @@ func (rt *Runtime) heartbeat(c *wkhttp.Context) {
 
 	// Atomically claim a pending ping for this daemon (prevents duplicate dispatch)
 	resp := gin.H{"status": "ok"}
-	claimedPing, _ := rt.db.claimPendingPing(spaceID, existing.DaemonID, time.Now().UnixMilli())
+	claimedPing, _ := rt.db.claimPendingPing(spaceID, existing.DaemonID, ownerUID, time.Now().UnixMilli())
 	if claimedPing != nil {
 		resp["pending_ping"] = gin.H{
 			"ping_id": claimedPing.ID,
@@ -262,7 +266,7 @@ func (rt *Runtime) heartbeat(c *wkhttp.Context) {
 	}
 
 	// Atomically claim a pending upgrade task
-	claimedUpgrade, _ := rt.db.claimPendingUpgrade(spaceID, existing.DaemonID)
+	claimedUpgrade, _ := rt.db.claimPendingUpgrade(spaceID, existing.DaemonID, ownerUID)
 	if claimedUpgrade != nil {
 		resp["pending_upgrade"] = gin.H{
 			"task_id":        claimedUpgrade.ID,
@@ -277,7 +281,7 @@ func (rt *Runtime) heartbeat(c *wkhttp.Context) {
 	// Atomically claim a pending bot.provision command for this daemon.
 	// PoC4: single composite command replaces PoC1's two-step agent.create
 	// + bot.add cycle.
-	claimedBot, _ := rt.db.claimPendingBotProvision(existing.DaemonID)
+	claimedBot, _ := rt.db.claimPendingBotProvision(existing.DaemonID, existing.SpaceID, ownerUID)
 	if claimedBot != nil {
 		resp["pending_command"] = rt.buildPendingBotProvision(claimedBot)
 	}
@@ -285,7 +289,10 @@ func (rt *Runtime) heartbeat(c *wkhttp.Context) {
 	// PR-B.2: managed_bots tells the daemon which bots to poll from
 	// matter on this heartbeat tick. PR-B.3 dropped the legacy
 	// pending_task fallback — daemon expects matter-only dispatch now.
-	managed, mberr := rt.db.listActiveBotsForDaemon(existing.DaemonID)
+	// v3 §4.3: scoped to (existing.SpaceID, ownerUID) so a cross-owner
+	// daemon_id collision (legal until §4.4 schema migration lands) can't
+	// leak the other owner's bot inventory through this heartbeat hint.
+	managed, mberr := rt.db.listActiveBotsForDaemon(existing.DaemonID, existing.SpaceID, ownerUID)
 	if mberr != nil {
 		rt.Warn("listActiveBotsForDaemon failed", zap.Error(mberr), zap.String("daemon_id", existing.DaemonID))
 	} else if len(managed) > 0 {
@@ -303,7 +310,7 @@ func (rt *Runtime) deregister(c *wkhttp.Context) {
 		return
 	}
 
-	ownerUID := c.MustGet("owner_uid").(string)
+	ownerUID := c.MustGet("uid").(string)
 	spaceID := c.MustGet("space_id").(string)
 
 	for _, id := range req.RuntimeIDs {
@@ -541,10 +548,12 @@ func (rt *Runtime) pingInit(c *wkhttp.Context) {
 		c.ResponseErrorWithStatus(errors.New("no permission to ping this device"), 403)
 		return
 	}
+	// 合并 plan 决策一+二 Phase 3B 补漏: pingInit 加 owner_uid 校验, 防止
+	// 同 space 内 user A 让 user B 的 daemon 来 ping (拿 RTT 等数据).
 	var accessCount int
 	if err := rt.db.session.SelectBySql(
-		`SELECT COUNT(*) FROM agent_runtime WHERE space_id = ? AND daemon_id = ?`,
-		req.SpaceID, req.DaemonID,
+		`SELECT COUNT(*) FROM agent_runtime WHERE space_id = ? AND daemon_id = ? AND owner_uid = ?`,
+		req.SpaceID, req.DaemonID, loginUID,
 	).LoadOne(&accessCount); err != nil {
 		rt.Error("check daemon access", zap.Error(err))
 		c.ResponseError(errors.New("query failed"))
@@ -561,6 +570,7 @@ func (rt *Runtime) pingInit(c *wkhttp.Context) {
 		ID:       pingID,
 		DaemonID: req.DaemonID,
 		SpaceID:  req.SpaceID,
+		OwnerUID: loginUID, // v3.3.1 §C.1: persist owner so claim/get can scope by it
 		ServerTS: time.Now().UnixMilli(),
 		Status:   "pending",
 	}
@@ -588,9 +598,23 @@ func (rt *Runtime) pingReport(c *wkhttp.Context) {
 		return
 	}
 
-	ownerUID := c.MustGet("owner_uid").(string)
+	ownerUID := c.MustGet("uid").(string)
 	apiSpaceID := c.MustGet("space_id").(string)
 	if entry.SpaceID != apiSpaceID {
+		c.ResponseErrorWithStatus(errors.New("no permission"), 403)
+		return
+	}
+	// v3.3.2 #2 (Jerry-Xin three-round P0): runtime_ping now carries its
+	// own owner_uid (runtime-20260606-02 migration), so reject when the
+	// row's owner doesn't match the caller. The agent_runtime EXISTS
+	// check below is necessary but not sufficient: after the 4-tuple
+	// unique key two owners can legitimately share (space, daemon),
+	// so EXISTS would pass for the wrong owner if they knew or guessed
+	// the ping id. Direct ping.owner_uid compare is the authoritative
+	// gate; the agent_runtime check stays as defense-in-depth (catches
+	// stale runtime rows / future bugs that miss the ping owner_uid
+	// plumbing). Symmetric with pingGet's v3.3.1 §C.1 (e) fix.
+	if entry.OwnerUID != ownerUID {
 		c.ResponseErrorWithStatus(errors.New("no permission"), 403)
 		return
 	}
@@ -635,7 +659,19 @@ func (rt *Runtime) pingGet(c *wkhttp.Context) {
 		c.ResponseErrorWithStatus(errors.New("no permission"), 403)
 		return
 	}
-	_ = loginUID
+	// v3.3.1 §C.1 (Jerry-Xin Critical, three-round): the ping row now
+	// carries its own owner_uid (runtime-20260606-02 schema migration),
+	// so the ownership check is a direct field compare — no JOIN through
+	// agent_runtime, no risk of resolving the wrong owner's row on a
+	// cross-owner daemon_id collision (the v3 §4.6 COUNT-WHERE-agent_runtime
+	// approach was a step in the right direction but the data model
+	// gap — runtime_ping without owner_uid — still let a collision
+	// produce inconsistent answers depending on which row got returned).
+	// Direct compare also saves one query per ping read.
+	if entry.OwnerUID != loginUID {
+		c.ResponseErrorWithStatus(errors.New("no permission"), 403)
+		return
+	}
 
 	c.Response(gin.H{
 		"ping_id": entry.ID,

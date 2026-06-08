@@ -362,13 +362,23 @@ func (rt *Runtime) insertUpgradeTask(c *wkhttp.Context, args insertTaskArgs) {
 	}
 	defer tx.RollbackUnlessCommitted()
 
-	// 先锁 agent_runtime 中该 daemon 的任一行（LIMIT 1），强制同 daemon 并发串行
+	// 先锁 agent_runtime 中该 (daemon, space, owner) 的任一行，强制同 owner 同 daemon
+	// 并发串行。
+	//
+	// v3.3.1 §C.3 (Jerry-Xin Critical 3, three-round): added owner_uid to
+	// both the FOR UPDATE row lock and the active-count check. Before
+	// this, the lock was per (daemon, space) — two distinct owners sharing
+	// a daemon_id (legal after runtime-20260606-01) would serialize on
+	// the same row and the active-count would include each other's
+	// in-progress upgrades, blocking unrelated tenants and effectively
+	// causing cross-tenant DoS. Scoping by owner gives each tenant their
+	// own concurrency budget.
 	var lockRow struct {
 		ID int64 `db:"id"`
 	}
 	_, err = tx.SelectBySql(
-		`SELECT id FROM agent_runtime WHERE daemon_id=? AND space_id=? ORDER BY id LIMIT 1 FOR UPDATE`,
-		args.DaemonID, args.SpaceID,
+		`SELECT id FROM agent_runtime WHERE daemon_id=? AND space_id=? AND owner_uid=? ORDER BY id LIMIT 1 FOR UPDATE`,
+		args.DaemonID, args.SpaceID, args.OwnerUID,
 	).Load(&lockRow)
 	if err != nil {
 		c.ResponseError(errors.New("internal error"))
@@ -378,9 +388,9 @@ func (rt *Runtime) insertUpgradeTask(c *wkhttp.Context, args insertTaskArgs) {
 	var activeCount int
 	tx.SelectBySql(
 		`SELECT COUNT(*) FROM runtime_upgrade_task
-		 WHERE daemon_id=?
+		 WHERE daemon_id=? AND space_id=? AND owner_uid=?
 		 AND status IN ('pending','dispatched','downloading','installing','restarting')`,
-		args.DaemonID,
+		args.DaemonID, args.SpaceID, args.OwnerUID,
 	).LoadOne(&activeCount)
 	if activeCount > 0 {
 		c.ResponseError(errors.New("an upgrade is already in progress for this daemon"))
@@ -436,7 +446,7 @@ func (rt *Runtime) upgradeGet(c *wkhttp.Context) {
 
 // POST /v1/daemon/upgrade/:task_id
 func (rt *Runtime) upgradeReport(c *wkhttp.Context) {
-	ownerUID := c.MustGet("owner_uid").(string)
+	ownerUID := c.MustGet("uid").(string)
 	apiSpaceID := c.MustGet("space_id").(string)
 	taskID := c.Param("task_id")
 
@@ -517,7 +527,7 @@ func validTransitionsFrom(component, target string) []string {
 // DB operations for upgrade
 
 // claim：去掉 component 过滤，同 daemon_id 下取最新 pending task
-func (d *runtimeDB) claimPendingUpgrade(spaceID, daemonID string) (*upgradeTask, error) {
+func (d *runtimeDB) claimPendingUpgrade(spaceID, daemonID, ownerUID string) (*upgradeTask, error) {
 	tx, err := d.session.Begin()
 	if err != nil {
 		return nil, err
@@ -525,12 +535,17 @@ func (d *runtimeDB) claimPendingUpgrade(spaceID, daemonID string) (*upgradeTask,
 	defer tx.RollbackUnlessCommitted()
 
 	var task upgradeTask
+	// owner_uid filter (reviewer fleet#24 Jerry-Xin): runtime_upgrade_task
+	// already carries owner_uid; the previous query relied on
+	// (space_id, daemon_id) alone which is vulnerable to same-space
+	// cross-owner daemon_id collisions (register allows caller-supplied
+	// daemon_id without uniqueness).
 	_, err = tx.SelectBySql(
 		`SELECT id, space_id, daemon_id, owner_uid, component, from_version, to_version, download_url, checksum, COALESCE(metadata,'') as metadata, status
 		 FROM runtime_upgrade_task
-		 WHERE space_id=? AND daemon_id=? AND status='pending'
+		 WHERE space_id=? AND daemon_id=? AND owner_uid=? AND status='pending'
 		 ORDER BY created_at DESC LIMIT 1 FOR UPDATE`,
-		spaceID, daemonID,
+		spaceID, daemonID, ownerUID,
 	).Load(&task)
 	if err != nil {
 		return nil, err
@@ -552,27 +567,39 @@ func (d *runtimeDB) claimPendingUpgrade(spaceID, daemonID string) (*upgradeTask,
 	return &task, nil
 }
 
-// daemon 升级关单：按 daemon_id + component + version 三元组
-func (d *runtimeDB) completeUpgradeIfMatched(daemonID, component, version string) {
+// daemon 升级关单：按 (space, daemon_id, owner, component, version) 五元组.
+//
+// v3.3.1 §C.2 (Jerry-Xin Critical 2, three-round): added spaceID + ownerUID
+// to the WHERE clause. Without these, the runtime-20260606-01 schema
+// migration's per-owner daemon rows could be "completed" by another
+// owner's register call sharing the same daemon_id + target version —
+// user B's daemon registration would silently mark user A's in-progress
+// upgrade complete. The fix scopes the UPDATE to the same (space, owner)
+// boundary as the task that created it.
+func (d *runtimeDB) completeUpgradeIfMatched(daemonID, spaceID, ownerUID, component, version string) {
 	d.session.UpdateBySql(
 		`UPDATE runtime_upgrade_task SET status='completed', updated_at=NOW()
-		 WHERE daemon_id=? AND component=? AND to_version=?
+		 WHERE daemon_id=? AND space_id=? AND owner_uid=? AND component=? AND to_version=?
 		 AND status IN ('dispatched','downloading','installing','restarting')`,
-		daemonID, component, version,
+		daemonID, spaceID, ownerUID, component, version,
 	).Exec()
 }
 
-// 插件升级关单：候选集按 daemon_id + component + in-progress + runtime_id 过滤；
-// 版本对比不要求精确相等（npx 安装的版本可能比任务创建时的 to_version 更新），
+// 插件升级关单：候选集按 (space, daemon, owner, component, in-progress, runtime_id)
+// 过滤；版本对比不要求精确相等（npx 安装的版本可能比任务创建时的 to_version 更新），
 // 只要 actual_version >= to_version 就关单。
-func (d *runtimeDB) completeUpgradeIfMatchedWithRuntime(daemonID, component, actualVersion string, runtimeID int64) {
+//
+// v3.3.1 §C.2: same (space, owner) scoping as completeUpgradeIfMatched —
+// the candidates SELECT is the cross-owner leak vector under the
+// post-§4.4 schema, not just the final UPDATE.
+func (d *runtimeDB) completeUpgradeIfMatchedWithRuntime(daemonID, spaceID, ownerUID, component, actualVersion string, runtimeID int64) {
 	var candidates []upgradeTask
 	_, err := d.session.SelectBySql(
 		`SELECT id, space_id, daemon_id, owner_uid, component, from_version, to_version, download_url, checksum, COALESCE(metadata,'') as metadata, status
 		 FROM runtime_upgrade_task
-		 WHERE daemon_id=? AND component=?
+		 WHERE daemon_id=? AND space_id=? AND owner_uid=? AND component=?
 		 AND status IN ('dispatched','downloading','installing','restarting')`,
-		daemonID, component,
+		daemonID, spaceID, ownerUID, component,
 	).Load(&candidates)
 	if err != nil {
 		return
