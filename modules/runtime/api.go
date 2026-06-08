@@ -42,9 +42,13 @@ func New(ctx *config.Context) *Runtime {
 }
 
 func (rt *Runtime) Route(r *wkhttp.WKHttp) {
-	// FLEET MIGRATION: auth swapped from user_api_key lookup (server-only
-	// table) to JWT verified against octo-server's JWKS. daemon endpoints
-	// require scope=daemon, web endpoints require scope=web.
+	// FLEET MIGRATION: daemon endpoints authenticated by api_key Bearer
+	// verified against octo-server's POST /v1/auth/verify-api-key
+	// (with verifyCache TTL 60s). web endpoints authenticated by session
+	// token verified against POST /v1/auth/verify?include=context.
+	// The earlier JWT/JWKS scheme was removed in Phase 4 of decisions 1+2
+	// (server PR #290 / fleet PR #24 / matter PR #78); fleet itself no
+	// longer holds or verifies JWTs.
 	daemon := r.Group("/v1/daemon", auth.Middleware("daemon"))
 	{
 		daemon.POST("/register", rt.register)
@@ -53,21 +57,25 @@ func (rt *Runtime) Route(r *wkhttp.WKHttp) {
 		daemon.POST("/ping/:ping_id", rt.pingReport)
 		daemon.POST("/upgrade/:task_id", rt.upgradeReport)
 		daemon.POST("/bots/:id/ack", rt.ackBot)
-		// PR-B.3: bot_task lives in octo-matter now. Daemons ack to
-		// matter, not fleet. Stale daemons still POSTing here would
-		// otherwise hit ackBotTask, which UPDATEs fleet's local
-		// bot_task table AND fires writebacks to matter — that would
-		// duplicate the timeline entry the daemon already wrote, or
-		// fight matter's own claim_token guard.
+		// PR-B.3: bot_task ownership moved to octo-matter; daemons ack to
+		// matter directly via POST /api/v1/internal/bot-tasks/:id/ack.
+		// Pre-cleanup, stale daemons posting here hit the (now-removed)
+		// ackBotTask handler, which UPDATEd fleet's local bot_task table
+		// AND fired writebacks to matter — that duplicated entries or
+		// fought matter's claim_token guard. v3.4 cleanup PR deleted the
+		// handler; the 410 stub remains for deploy-compatibility (stale
+		// daemons get an actionable 410 with migration hint).
 		daemon.POST("/bot-tasks/:id/ack", rt.ackBotTaskDeprecated)
 	}
 
 	internal := r.Group("/v1/internal", rt.internalTokenAuth())
 	{
-		// PR-B.3: bot_task ownership moved to matter (see octo-matter
-		// migrations/008_bot_task.sql). Fleet no longer accepts task
-		// enqueue requests. The route is closed off but the handler
-		// implementation is kept until PR-C for rollback.
+		// PR-B.3 closed off the route; v3.4 cleanup PR removed the
+		// handler implementation. Only the 410 stub remains for
+		// stale-daemon compatibility (see ackBotTaskDeprecated above).
+		// runtime-20260601-01.sql bot_task table is intentionally NOT
+		// dropped — production rows may exist, DROP TABLE needs explicit
+		// data-archive evaluation (separate decision).
 		internal.POST("/bot-tasks", rt.createBotTaskDeprecated)
 	}
 
