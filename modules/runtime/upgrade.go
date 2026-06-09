@@ -17,8 +17,8 @@ const (
 	componentDaemon = "octo-daemon"
 	componentPlugin = "octo"
 
-	daemonUpgradeTimeoutSec = 120  // 2 分钟
-	pluginUpgradeTimeoutSec = 600  // 10 分钟（npm install + 依赖 + gateway restart）
+	daemonUpgradeTimeoutSec = 120 // 2 分钟
+	pluginUpgradeTimeoutSec = 600 // 10 分钟（npm install + 依赖 + gateway restart）
 )
 
 // providerComponents 是允许远程升级的 provider 组件白名单（对应 agent_runtime.provider）。
@@ -164,6 +164,7 @@ func (rt *Runtime) createComponentUpgradeTask(c *wkhttp.Context, loginUID string
 		DownloadURL: "",
 		Checksum:    "",
 		Metadata:    string(taskMeta),
+		RuntimeID:   req.RuntimeID,
 	})
 }
 
@@ -335,6 +336,7 @@ func (rt *Runtime) createPluginUpgradeTask(c *wkhttp.Context, loginUID string, r
 		DownloadURL: "",
 		Checksum:    "",
 		Metadata:    string(taskMeta),
+		RuntimeID:   req.RuntimeID,
 	})
 }
 
@@ -348,6 +350,10 @@ type insertTaskArgs struct {
 	DownloadURL string
 	Checksum    string
 	Metadata    string
+	// RuntimeID: 决策三 SSE 用 — component/plugin upgrade 填具体 runtime,
+	// daemon 自身 upgrade 留 0 (dispatcher 走 firstRuntimeIDForDaemon
+	// fallback). 仅用于 SSE push target, 不写 runtime_upgrade_task 表.
+	RuntimeID int64
 }
 
 // 互斥：同 daemon_id 只允许一个 in-progress 任务（无论 component）
@@ -386,12 +392,19 @@ func (rt *Runtime) insertUpgradeTask(c *wkhttp.Context, args insertTaskArgs) {
 	}
 
 	var activeCount int
-	tx.SelectBySql(
+	// F-1 (lml2468 review): LoadOne err 必须接 — swallow 会让 activeCount=0
+	// 绕过 "已 in-progress" 检查, 重复 INSERT pending row, 破坏单 in-progress
+	// per-daemon 不变量.
+	if err := tx.SelectBySql(
 		`SELECT COUNT(*) FROM runtime_upgrade_task
 		 WHERE daemon_id=? AND space_id=? AND owner_uid=?
 		 AND status IN ('pending','dispatched','downloading','installing','restarting')`,
 		args.DaemonID, args.SpaceID, args.OwnerUID,
-	).LoadOne(&activeCount)
+	).LoadOne(&activeCount); err != nil {
+		rt.Error("active upgrade count query", zap.Error(err), zap.String("daemon_id", args.DaemonID))
+		c.ResponseError(errors.New("internal error"))
+		return
+	}
 	if activeCount > 0 {
 		c.ResponseError(errors.New("an upgrade is already in progress for this daemon"))
 		return
@@ -409,7 +422,42 @@ func (rt *Runtime) insertUpgradeTask(c *wkhttp.Context, args insertTaskArgs) {
 		c.ResponseError(errors.New("create upgrade task failed"))
 		return
 	}
-	tx.Commit()
+	// F-1 (lml2468 review): tx.Commit() err 必须接 — 之前 swallow 会返
+	// 200 OK 但 taskID 不存在, SSE dispatch 推 event daemon 追不到行,
+	// 静默腐败. 接 err → 500 让 daemon 不收到 event, web 看到 5xx 重试.
+	if err := tx.Commit(); err != nil {
+		rt.Error("commit upgrade task", zap.Error(err), zap.String("task_id", taskID))
+		c.ResponseError(errors.New("create upgrade task failed"))
+		return
+	}
+
+	// 决策三 SSE 反向派发 (Phase A 双跑): component/plugin upgrade 已知
+	// runtime_id 直接推; daemon 自身 upgrade 走 firstRuntimeIDForDaemon
+	// fallback (daemon 进程的任一 runtime SSE 收到都触发 upgrade handler).
+	// heartbeat claimPendingXxx 仍兜底.
+	targetRuntimeID := args.RuntimeID
+	if targetRuntimeID <= 0 {
+		if rid, rerr := rt.db.firstRuntimeIDForDaemon(args.SpaceID, args.DaemonID, args.OwnerUID); rerr == nil && rid > 0 {
+			targetRuntimeID = rid
+		} else if rerr != nil {
+			rt.Warn("sse: firstRuntimeIDForDaemon (upgrade)", zap.Error(rerr), zap.String("daemon_id", args.DaemonID))
+		}
+	}
+	if targetRuntimeID > 0 {
+		rt.dispatchUpgrade(targetRuntimeID, args.SpaceID, args.OwnerUID, &upgradeTask{
+			ID:          taskID,
+			SpaceID:     args.SpaceID,
+			DaemonID:    args.DaemonID,
+			OwnerUID:    args.OwnerUID,
+			Component:   args.Component,
+			FromVersion: args.FromVersion,
+			ToVersion:   args.ToVersion,
+			DownloadURL: args.DownloadURL,
+			Checksum:    args.Checksum,
+			Metadata:    args.Metadata,
+			Status:      "pending",
+		})
+	}
 
 	c.Response(gin.H{"task_id": taskID})
 }
@@ -501,25 +549,31 @@ func (rt *Runtime) upgradeReport(c *wkhttp.Context) {
 // octo-daemon 有完整 5 态机；其他所有组件（plugin + provider 组件）
 // 都走精简的 dispatched → installing → (completed by register / failed) 3 态机。
 func validTransitionsFrom(component, target string) []string {
+	// SSE fast-path 不经 claimPendingUpgrade (heartbeat 路径才把 row 转 dispatched),
+	// 所以 daemon 通过 SSE 直接 report 第一跳时 row 仍是 'pending'. 第一跳
+	// (downloading / installing) 接受 pending|dispatched 两种起始状态
+	// (codex review final BLOCKER): 只接受 'dispatched' 时, SSE 路径首个
+	// report 静默 affected=0, daemon 端 dedup 已 mark, 后续 heartbeat 又
+	// block 不能 re-deliver → task 永远卡到 sweeper timeout.
 	if component == componentDaemon {
 		switch target {
 		case "downloading":
-			return []string{"dispatched"}
+			return []string{"pending", "dispatched"}
 		case "installing":
 			return []string{"downloading"}
 		case "restarting":
 			return []string{"installing"}
 		case "failed":
-			return []string{"dispatched", "downloading", "installing", "restarting"}
+			return []string{"pending", "dispatched", "downloading", "installing", "restarting"}
 		}
 		return nil
 	}
 	// plugin + provider 组件
 	switch target {
 	case "installing":
-		return []string{"dispatched"}
+		return []string{"pending", "dispatched"}
 	case "failed":
-		return []string{"dispatched", "installing"}
+		return []string{"pending", "dispatched", "installing"}
 	}
 	return nil
 }
@@ -577,10 +631,14 @@ func (d *runtimeDB) claimPendingUpgrade(spaceID, daemonID, ownerUID string) (*up
 // upgrade complete. The fix scopes the UPDATE to the same (space, owner)
 // boundary as the task that created it.
 func (d *runtimeDB) completeUpgradeIfMatched(daemonID, spaceID, ownerUID, component, version string) {
+	// F-3 (lml2468 review): 加 'pending' 对称 R3 first-hop 放宽. SSE
+	// fast-path 不经 claimPendingUpgrade, row 可能仍 pending 时 daemon
+	// 完成 upgrade → register 触发 close-out. 不接 pending 会让 task 卡
+	// 等 sweeper timeout.
 	d.session.UpdateBySql(
 		`UPDATE runtime_upgrade_task SET status='completed', updated_at=NOW()
 		 WHERE daemon_id=? AND space_id=? AND owner_uid=? AND component=? AND to_version=?
-		 AND status IN ('dispatched','downloading','installing','restarting')`,
+		 AND status IN ('pending','dispatched','downloading','installing','restarting')`,
 		daemonID, spaceID, ownerUID, component, version,
 	).Exec()
 }
@@ -594,11 +652,12 @@ func (d *runtimeDB) completeUpgradeIfMatched(daemonID, spaceID, ownerUID, compon
 // post-§4.4 schema, not just the final UPDATE.
 func (d *runtimeDB) completeUpgradeIfMatchedWithRuntime(daemonID, spaceID, ownerUID, component, actualVersion string, runtimeID int64) {
 	var candidates []upgradeTask
+	// F-3 (lml2468 review): 加 'pending' 对称 R3, 跟 completeUpgradeIfMatched 同理由.
 	_, err := d.session.SelectBySql(
 		`SELECT id, space_id, daemon_id, owner_uid, component, from_version, to_version, download_url, checksum, COALESCE(metadata,'') as metadata, status
 		 FROM runtime_upgrade_task
 		 WHERE daemon_id=? AND space_id=? AND owner_uid=? AND component=?
-		 AND status IN ('dispatched','downloading','installing','restarting')`,
+		 AND status IN ('pending','dispatched','downloading','installing','restarting')`,
 		daemonID, spaceID, ownerUID, component,
 	).Load(&candidates)
 	if err != nil {

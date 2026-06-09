@@ -83,6 +83,29 @@ func (d *runtimeDB) listBySpaceIDAndOwner(spaceID, ownerUID string) ([]*agentRun
 	return list, err
 }
 
+// firstRuntimeIDForDaemon 解析 (space, daemon, owner) 对应的任一**在线**
+// runtime id, 用作 daemon-level SSE event (ping / daemon 自身 upgrade) 的
+// push 目标. SSE channel 是 per-runtime (决策三 v6 §Q2), 而 ping/daemon-
+// upgrade 是 daemon 级事件 — 推到任一在线 runtime 即触发 daemon 处理
+// (daemon-side dedup 按 event_type+source_pk 防同事件多 runtime 重复处理).
+//
+// status='online' 过滤 (F3 caster review final): 若最老 runtime offline
+// (CLI 卸载/故障) 推到死 channel 会静默丢, daemon 退 heartbeat 5-7s 兜底
+// 失去 SSE 加速意义. 过滤后取最老的在线 runtime, 全 offline 才返 0.
+//
+// 返回 0 表示该 daemon 没有 online runtime, 这种情况 dispatcher 跳过
+// in-mem push, event 仍写 log, daemon 下次连上后走 Last-Event-ID 重放.
+func (d *runtimeDB) firstRuntimeIDForDaemon(spaceID, daemonID, ownerUID string) (int64, error) {
+	var id int64
+	_, err := d.session.SelectBySql(
+		`SELECT id FROM agent_runtime
+		 WHERE space_id=? AND daemon_id=? AND owner_uid=? AND status='online'
+		 ORDER BY id ASC LIMIT 1`,
+		spaceID, daemonID, ownerUID,
+	).Load(&id)
+	return id, err
+}
+
 func (d *runtimeDB) updateHeartbeat(id int64) error {
 	_, err := d.session.Update("agent_runtime").
 		Set("status", "online").
@@ -242,8 +265,14 @@ func (d *runtimeDB) getPing(pingID string) (*pingEntry, error) {
 }
 
 func (d *runtimeDB) updatePingResult(pingID string, daemonTS, rtt int64) error {
+	// SSE fast-path 不经 claimPendingPing (heartbeat 路径 才把 row 转 dispatched),
+	// 所以 daemon 通过 SSE 直接 ReportPing 时 row 仍是 'pending'. 接受
+	// pending|dispatched 两种起始状态 → done, 让 SSE / heartbeat 都能完成
+	// 状态转换 (codex review final BLOCKER): SQL 只接受 'dispatched' 时, SSE
+	// 路径 updatePingResult 静默 affected=0, 但 daemon 端 dedup 已 mark, 后续
+	// heartbeat 又 block 不能 re-deliver → ping 永远卡 dispatched 直到 timeoutPing.
 	_, err := d.session.UpdateBySql(
-		`UPDATE runtime_ping SET daemon_ts=?, rtt_ms=?, status='done' WHERE id=? AND status='dispatched'`,
+		`UPDATE runtime_ping SET daemon_ts=?, rtt_ms=?, status='done' WHERE id=? AND status IN ('pending','dispatched')`,
 		daemonTS, rtt, pingID,
 	).Exec()
 	return err

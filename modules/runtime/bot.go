@@ -161,7 +161,7 @@ func (d *runtimeDB) queryBotByID(id int64) (*botModel, error) {
 
 // listBotsBySpace lists active bots in the given (space, owner) scope.
 // v3 §4.5 (defense-in-depth C): ownerUID is now mandatory — the prior
-// "ownerUID='' disables filter" branch was the enumeration vector via
+// "ownerUID=” disables filter" branch was the enumeration vector via
 // listBots's `?owner_uid=` query param. Caller must always pass the
 // authenticated loginUID; pass-through of unauthenticated input is no
 // longer supported here.
@@ -353,11 +353,11 @@ type patchBotMintReq struct {
 // PATCH /v1/runtimes/bots/:id/mint
 //
 // Web caller flow:
-//   1. POST /v1/runtimes/bots       → fleet inserts draft row, returns id
-//   2. POST /v1/bot/mint (server)   → server mints IM bot, returns bot_uid
-//   3. PATCH /v1/runtimes/bots/:id/mint {bot_uid} → fleet promotes row
-//      to bot_minted (openclaw) or active (inert), queues bot.provision
-//      for the daemon to claim on its next heartbeat.
+//  1. POST /v1/runtimes/bots       → fleet inserts draft row, returns id
+//  2. POST /v1/bot/mint (server)   → server mints IM bot, returns bot_uid
+//  3. PATCH /v1/runtimes/bots/:id/mint {bot_uid} → fleet promotes row
+//     to bot_minted (openclaw) or active (inert), queues bot.provision
+//     for the daemon to claim on its next heartbeat.
 //
 // bot_token is NEVER written to fleet — it remains on octo-server and the
 // daemon fetches it via GET /v1/bot/:uid/token using its daemon-scope JWT.
@@ -411,6 +411,17 @@ func (rt *Runtime) patchBotMint(c *wkhttp.Context) {
 	row.BotUID = req.BotUID
 	row.Status = nextStatus
 	row.UpdatedAt = db.Time(time.Now())
+
+	// 决策三 SSE 反向派发 (Phase A 双跑): openclaw bot 进 bot_minted 状态
+	// 后, 推 bot_provision wake-up event 给目标 runtime, daemon 收到后
+	// 走 GET /v1/daemon/bot-provisions/:id 单独 fetch full payload
+	// (含 bot_token). A3 决策: token 不进 SSE stream / 不进 event_log.
+	// heartbeat claimPendingBotProvision 仍兜底.
+	if nextStatus == botStatusBotMinted && row.RuntimeID > 0 {
+		rt.dispatchBotProvision(row.RuntimeID, row.SpaceID, row.OwnerUID, fmt.Sprintf("%d", row.Id))
+		rt.dispatchManagedBotsChanged(row.RuntimeID, row.SpaceID, row.OwnerUID, []string{req.BotUID}, nil)
+	}
+
 	c.Response(toBotResp(row))
 }
 
@@ -508,6 +519,13 @@ func (rt *Runtime) archiveBot(c *wkhttp.Context) {
 		c.ResponseError(errors.New("archive failed"))
 		return
 	}
+	// 决策三 SSE: bot 归档 → managed_bots_changed delta 推到目标 runtime
+	// 让 daemon 立即从本地 active 集合移除. heartbeat managed_bots
+	// snapshot 仍是 baseline (Phase B 改 30s 后这条 delta 是主要实时性
+	// 来源 — v6 plan §3.5 A2 trade-off).
+	if m.RuntimeID > 0 && m.BotUID != "" {
+		rt.dispatchManagedBotsChanged(m.RuntimeID, m.SpaceID, m.OwnerUID, nil, []string{m.BotUID})
+	}
 	c.ResponseOK()
 }
 
@@ -555,6 +573,15 @@ func (rt *Runtime) ackBot(c *wkhttp.Context) {
 		rt.Error("ackBot update", zap.Error(err))
 		c.ResponseError(errors.New("ack failed"))
 		return
+	}
+	// F-2 (lml2468 review): ack 'failed' 时补 managed_bots_changed{removed}
+	// compensating event. patchBotMint 已发 added (bot_minted → SSE delta),
+	// 这里 ack failed 必须发 removed 让 daemon 缓存清掉 phantom bot, 否则
+	// daemon 一直 poll matter 拿这个不存在的 bot 的 task. heartbeat snapshot
+	// 5-7s 后也会 reconcile, 但 SSE delta 是优先实时性. 'active' 不发
+	// removed (bot 正常 provision 成功, daemon 缓存里就该有).
+	if req.Status == botStatusFailed && m.RuntimeID > 0 && m.BotUID != "" {
+		rt.dispatchManagedBotsChanged(m.RuntimeID, m.SpaceID, m.OwnerUID, nil, []string{m.BotUID})
 	}
 	c.ResponseOK()
 }

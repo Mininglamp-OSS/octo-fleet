@@ -21,16 +21,21 @@ import (
 type Runtime struct {
 	ctx *config.Context
 	log.Log
-	db runtimeDB
+	db      runtimeDB
+	eventDB eventLogDB
+	sseHub  *sseHub
 }
 
 func New(ctx *config.Context) *Runtime {
 	rt := &Runtime{
-		ctx: ctx,
-		Log: log.NewTLog("Runtime"),
-		db:  *newRuntimeDB(ctx),
+		ctx:     ctx,
+		Log:     log.NewTLog("Runtime"),
+		db:      *newRuntimeDB(ctx),
+		eventDB: *newEventLogDB(ctx),
+		sseHub:  newSseHub(),
 	}
 	go rt.runSweeper()
+	go rt.runEventLogSweeper()
 
 	// 版本同步：从 COS 拉取 version.json 写入 runtime_latest_version。
 	// 独立 goroutine，不塞进 runSweeper，失败不影响其他扫描。
@@ -57,6 +62,12 @@ func (rt *Runtime) Route(r *wkhttp.WKHttp) {
 		daemon.POST("/ping/:ping_id", rt.pingReport)
 		daemon.POST("/upgrade/:task_id", rt.upgradeReport)
 		daemon.POST("/bots/:id/ack", rt.ackBot)
+		// 决策三 SSE 反向派发: long-lived push 替代 heartbeat 夹带 pending.
+		// 双跑期 (Phase A): SSE 优先, heartbeat pending dispatch 兜底.
+		// daemon 端 dedup file 去重双跑产生的重复.
+		daemon.GET("/events", rt.sseEvents)
+		// 决策三 A3: bot_provision secret fetch (token 不进 SSE stream).
+		daemon.GET("/bot-provisions/:command_id", rt.fetchBotProvision)
 		// PR-B.3: bot_task ownership moved to octo-matter; daemons ack to
 		// matter directly via POST /api/v1/internal/bot-tasks/:id/ack.
 		// Pre-cleanup, stale daemons posting here hit the (now-removed)
@@ -586,6 +597,16 @@ func (rt *Runtime) pingInit(c *wkhttp.Context) {
 		rt.Error("insert ping", zap.Error(err))
 		c.ResponseError(errors.New("ping init failed"))
 		return
+	}
+
+	// 决策三 SSE 反向派发 (Phase A 双跑): 给该 daemon 任一 runtime 推 ping
+	// event, daemon 任一 runtime SSE goroutine 收到即唤起 ping handler
+	// (daemon dedup 按 (event_type, ping_id) 防重复). 失败不阻塞主流程 —
+	// heartbeat claimPendingPing 仍兜底.
+	if rid, rerr := rt.db.firstRuntimeIDForDaemon(req.SpaceID, req.DaemonID, loginUID); rerr == nil && rid > 0 {
+		rt.dispatchPing(rid, req.SpaceID, loginUID, pingID)
+	} else if rerr != nil {
+		rt.Warn("sse: firstRuntimeIDForDaemon (ping)", zap.Error(rerr), zap.String("daemon_id", req.DaemonID))
 	}
 
 	go func() {
