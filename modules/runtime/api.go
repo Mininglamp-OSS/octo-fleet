@@ -300,7 +300,7 @@ func (rt *Runtime) heartbeat(c *wkhttp.Context) {
 	// Atomically claim a pending bot.provision command for this daemon.
 	// PoC4: single composite command replaces PoC1's two-step agent.create
 	// + bot.add cycle.
-	claimedBot, _ := rt.db.claimPendingBotProvision(existing.DaemonID, existing.SpaceID, ownerUID)
+	claimedBot, _ := rt.db.claimPendingBotProvision(existing.DaemonID, existing.SpaceID, ownerUID, existing.Provider)
 	if claimedBot != nil {
 		resp["pending_command"] = rt.buildPendingBotProvision(claimedBot)
 	}

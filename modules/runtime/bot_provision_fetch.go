@@ -40,6 +40,7 @@ import (
 type botProvisionFetchResponse struct {
 	ID          int64  `json:"id"`
 	Action      string `json:"action"`
+	RuntimeKind string `json:"runtime_kind"`
 	WorkspaceID string `json:"workspace_id"`
 	DisplayName string `json:"display_name"`
 	BotUID      string `json:"bot_uid"`
@@ -53,6 +54,7 @@ func toFetchResponse(m *botModel) botProvisionFetchResponse {
 	return botProvisionFetchResponse{
 		ID:          m.Id,
 		Action:      "bot.provision",
+		RuntimeKind: m.RuntimeKind,
 		WorkspaceID: m.WorkspaceID,
 		DisplayName: m.Name,
 		BotUID:      m.BotUID,

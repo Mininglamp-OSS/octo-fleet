@@ -186,9 +186,9 @@ func (d *runtimeDB) listBotsBySpace(spaceID, ownerUID, runtimeKind string) ([]*b
 	return out, nil
 }
 
-// claimPendingBotProvision picks one bot_minted openclaw row for this
-// daemon, marks dispatched + sets claim_token, returns it.
-func (d *runtimeDB) claimPendingBotProvision(daemonID, spaceID, ownerUID string) (*botModel, error) {
+// claimPendingBotProvision picks one bot_minted row of the given runtime kind
+// for this daemon, marks dispatched + sets claim_token, returns it.
+func (d *runtimeDB) claimPendingBotProvision(daemonID, spaceID, ownerUID, runtimeKind string) (*botModel, error) {
 	tx, err := d.session.Begin()
 	if err != nil {
 		return nil, err
@@ -209,7 +209,7 @@ func (d *runtimeDB) claimPendingBotProvision(daemonID, spaceID, ownerUID string)
 		"SELECT "+botSelectColumns+` FROM bot
 		 WHERE daemon_id=? AND owner_uid=? AND space_id=? AND runtime_kind=? AND status=?
 		 ORDER BY id ASC LIMIT 1 FOR UPDATE`,
-		daemonID, ownerUID, spaceID, runtimeKindOpenclaw, botStatusBotMinted,
+		daemonID, ownerUID, spaceID, runtimeKind, botStatusBotMinted,
 	).Load(&m)
 	if err != nil || count == 0 {
 		return nil, err
@@ -319,9 +319,11 @@ func (rt *Runtime) createBot(c *wkhttp.Context) {
 		Name:        name,
 		Status:      botStatusDraft,
 	}
-	if req.RuntimeKind == runtimeKindOpenclaw {
-		row.WorkspaceID = deriveWorkspaceID(name)
-	}
+	// Every runtime kind gets a workspace_id: the daemon's provision handler
+	// requires it non-empty. openclaw uses it as the agent/workspace name;
+	// other kinds (claude/codex/hermes) carry it as a stable per-bot id even
+	// when their adapter doesn't key local resources on it.
+	row.WorkspaceID = deriveWorkspaceID(name)
 
 	id, err := rt.db.insertBot(row)
 	if err != nil {
@@ -394,12 +396,11 @@ func (rt *Runtime) patchBotMint(c *wkhttp.Context) {
 		return
 	}
 
-	// openclaw bots need daemon provisioning; others go straight to
-	// active (inert — non-openclaw paths are not yet implemented).
-	nextStatus := botStatusActive
-	if row.RuntimeKind == runtimeKindOpenclaw {
-		nextStatus = botStatusBotMinted
-	}
+	// All runtime kinds need daemon provisioning now. The daemon resolves the
+	// runtime_kind to the matching adapter; kinds whose adapter is not yet
+	// implemented ack the provision as failed (visible) rather than silently
+	// staying inert.
+	nextStatus := botStatusBotMinted
 	if _, err := rt.db.session.UpdateBySql(
 		`UPDATE bot SET bot_uid=?, status=? WHERE id=?`,
 		req.BotUID, nextStatus, id,
@@ -412,11 +413,11 @@ func (rt *Runtime) patchBotMint(c *wkhttp.Context) {
 	row.Status = nextStatus
 	row.UpdatedAt = db.Time(time.Now())
 
-	// 决策三 SSE 反向派发 (Phase A 双跑): openclaw bot 进 bot_minted 状态
-	// 后, 推 bot_provision wake-up event 给目标 runtime, daemon 收到后
-	// 走 GET /v1/daemon/bot-provisions/:id 单独 fetch full payload
-	// (含 bot_token). A3 决策: token 不进 SSE stream / 不进 event_log.
-	// heartbeat claimPendingBotProvision 仍兜底.
+	// 决策三 SSE 反向派发 (Phase A 双跑): bot 进 bot_minted 状态后, 推
+	// bot_provision wake-up event 给目标 runtime, daemon 收到后走
+	// GET /v1/daemon/bot-provisions/:id 单独 fetch full payload (含 bot_token).
+	// A3 决策: token 不进 SSE stream / 不进 event_log. heartbeat
+	// claimPendingBotProvision 仍兜底.
 	if nextStatus == botStatusBotMinted && row.RuntimeID > 0 {
 		rt.dispatchBotProvision(row.RuntimeID, row.SpaceID, row.OwnerUID, fmt.Sprintf("%d", row.Id))
 		rt.dispatchManagedBotsChanged(row.RuntimeID, row.SpaceID, row.OwnerUID, []string{req.BotUID}, nil)
@@ -597,6 +598,7 @@ func (rt *Runtime) buildPendingBotProvision(m *botModel) gin.H {
 	return gin.H{
 		"id":           m.Id,
 		"action":       "bot.provision",
+		"runtime_kind": m.RuntimeKind,
 		"workspace_id": m.WorkspaceID,
 		"display_name": m.Name,
 		"bot_uid":      m.BotUID,
