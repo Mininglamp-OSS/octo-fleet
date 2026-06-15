@@ -296,14 +296,14 @@ func (rt *Runtime) upsertLatestVersionAdmin(c *wkhttp.Context) {
 		c.ResponseError(fmt.Errorf("latest_version %q not semver-like", req.LatestVersion))
 		return
 	}
-	if req.ReleaseMeta != nil && string(req.ReleaseMeta) != "null" {
-		if !json.Valid(req.ReleaseMeta) {
-			c.ResponseError(errors.New("release_meta must be valid JSON"))
-			return
-		}
+	// release_meta 可选:nil(省略)和 JSON "null" 都视为无;非空必须是合法 JSON。
+	hasReleaseMeta := req.ReleaseMeta != nil && string(req.ReleaseMeta) != "null"
+	if hasReleaseMeta && !json.Valid(req.ReleaseMeta) {
+		c.ResponseError(errors.New("release_meta must be valid JSON"))
+		return
 	}
 	releaseMeta := ""
-	if req.ReleaseMeta != nil && string(req.ReleaseMeta) != "null" {
+	if hasReleaseMeta {
 		releaseMeta = string(req.ReleaseMeta)
 	}
 	if err := rt.db.upsertLatestVersion(req.Component, req.LatestVersion, releaseMeta); err != nil {
