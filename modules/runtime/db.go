@@ -405,3 +405,12 @@ func (d *runtimeDB) listActiveBotsForDaemon(daemonID, spaceID, ownerUID string) 
 	}
 	return out, nil
 }
+
+// loadProviders 读取 runtime_provider 全表，供 providerRegistry 刷新快照。
+func (d *runtimeDB) loadProviders() ([]providerDef, error) {
+	var rows []providerDef
+	_, err := d.session.SelectBySql(
+		"SELECT name, display_name, binary_name, upgrade_timeout_sec, status FROM runtime_provider ORDER BY sort_order ASC, name ASC",
+	).Load(&rows)
+	return rows, err
+}
