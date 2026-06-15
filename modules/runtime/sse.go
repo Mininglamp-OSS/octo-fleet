@@ -16,8 +16,8 @@ import (
 
 // 决策三 SSE 反向派发: fleet 端 long-lived 推送.
 //
-// 替代 heartbeat response 夹带 pending_ping/pending_upgrade/pending_command
-// 的拉模式, 把 4 类反向派发改成 SSE 主动推 (延迟 5-7s → <500ms).
+// 替代 heartbeat response 夹带 pending_upgrade/pending_command
+// 的拉模式, 把反向派发改成 SSE 主动推 (延迟 5-7s → <500ms).
 //
 // 架构 (v6 plan §3.4):
 //   - GET /v1/daemon/events?runtime_id=N
@@ -30,7 +30,7 @@ import (
 //   - 30s keepalive 防 nginx idle timeout (deploy 配 proxy_read_timeout 1h)
 //   - 60s TTL re-verify: align verifyCache TTL (revocation 窗口 §3.7)
 //
-// dispatcher 入口 (供 createPing / createUpgrade / createBotProvision /
+// dispatcher 入口 (供 createUpgrade / createBotProvision /
 // managed_bots CRUD 调用): 先 INSERT event_log (拿自增 id), 再 non-blocking
 // publish 到 channel. channel full → 跳过 in-mem 推 (event 已落 log,
 // daemon 重连走 Last-Event-ID replay).
@@ -338,20 +338,6 @@ func writeSSEEvent(w io.Writer, rc *http.ResponseController, id int64, eventType
 //
 // Phase A 双跑期间: heartbeat 仍 claimPendingXxx 兜底, 这里仅"加"路径,
 // 不动 heartbeat handler. daemon 端 dedup file 去重双跑产生的重复.
-
-func (rt *Runtime) dispatchPing(runtimeID int64, spaceID, ownerUID, pingID string) {
-	payload, err := json.Marshal(map[string]any{"ping_id": pingID})
-	if err != nil {
-		rt.Warn("sse dispatch ping: marshal", zap.Error(err), zap.Int64("runtime_id", runtimeID), zap.String("ping_id", pingID))
-		return
-	}
-	id, err := rt.eventDB.insert(runtimeID, spaceID, ownerUID, eventTypePing, string(payload))
-	if err != nil {
-		rt.Warn("sse dispatch ping: event_log insert", zap.Error(err), zap.Int64("runtime_id", runtimeID), zap.String("ping_id", pingID))
-		return
-	}
-	rt.sseHub.publish(runtimeID, eventEnvelope{ID: id, Type: eventTypePing, PayloadJSON: string(payload)})
-}
 
 func (rt *Runtime) dispatchUpgrade(runtimeID int64, spaceID, ownerUID string, task *upgradeTask) {
 	payload, err := json.Marshal(map[string]any{

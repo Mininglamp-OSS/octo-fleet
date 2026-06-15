@@ -19,11 +19,11 @@ func TestWriteSSEEvent_WireFormat(t *testing.T) {
 	var buf bytes.Buffer
 	// rc=nil — test 直接调 writeSSEEvent 不必造 ResponseController, helper 内
 	// 部 rc != nil 才 set deadline. production sseEvents handler 总传非 nil.
-	if err := writeSSEEvent(&buf, nil, 42, "ping", `{"ping_id":"ping_123"}`); err != nil {
+	if err := writeSSEEvent(&buf, nil, 42, "upgrade", `{"task_id":"task_123"}`); err != nil {
 		t.Fatalf("writeSSEEvent: %v", err)
 	}
 	got := buf.String()
-	want := "event: ping\nid: 42\ndata: {\"ping_id\":\"ping_123\"}\n\n"
+	want := "event: upgrade\nid: 42\ndata: {\"task_id\":\"task_123\"}\n\n"
 	if got != want {
 		t.Errorf("wire format mismatch:\n  got:  %q\n  want: %q", got, want)
 	}
@@ -33,7 +33,6 @@ func TestWriteSSEEvent_AllEventTypes(t *testing.T) {
 	cases := []struct {
 		eventType string
 	}{
-		{eventTypePing},
 		{eventTypeUpgrade},
 		{eventTypeBotProvision},
 		{eventTypeManagedBotsChanged},
@@ -60,12 +59,12 @@ func TestSseHub_RegisterPublishDeliver(t *testing.T) {
 	ch, cleanup := hub.register(101)
 	defer cleanup()
 
-	ev := eventEnvelope{ID: 1, Type: eventTypePing, PayloadJSON: `{"ping_id":"p"}`}
+	ev := eventEnvelope{ID: 1, Type: eventTypeUpgrade, PayloadJSON: `{"task_id":"task_123"}`}
 	hub.publish(101, ev)
 
 	select {
 	case got := <-ch:
-		if got.ID != 1 || got.Type != eventTypePing {
+		if got.ID != 1 || got.Type != eventTypeUpgrade {
 			t.Errorf("delivered envelope mismatch: %+v", got)
 		}
 	case <-time.After(100 * time.Millisecond):
@@ -76,7 +75,7 @@ func TestSseHub_RegisterPublishDeliver(t *testing.T) {
 func TestSseHub_PublishUnregistered_NoOp(t *testing.T) {
 	// 防 publish 到没注册的 runtime panic / 阻塞.
 	hub := newSseHub()
-	hub.publish(999, eventEnvelope{ID: 1, Type: eventTypePing})
+	hub.publish(999, eventEnvelope{ID: 1, Type: eventTypeBotProvision})
 	// 走到这里就 pass — 不应 panic / 阻塞.
 }
 
@@ -164,7 +163,7 @@ func TestSseHub_ConcurrentRegisterPublish(t *testing.T) {
 		defer wg.Done()
 		for i := 0; i < 50; i++ {
 			for rid := int64(1); rid <= 10; rid++ {
-				hub.publish(rid, eventEnvelope{ID: int64(i), Type: eventTypePing})
+				hub.publish(rid, eventEnvelope{ID: int64(i), Type: eventTypeUpgrade})
 			}
 			time.Sleep(time.Millisecond)
 		}
