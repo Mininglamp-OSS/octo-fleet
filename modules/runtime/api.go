@@ -100,8 +100,6 @@ func (rt *Runtime) Route(r *wkhttp.WKHttp) {
 	{
 		authGroup.GET("/runtimes", rt.list)
 		authGroup.DELETE("/runtimes/:id", rt.deleteRuntime)
-		authGroup.POST("/runtimes/ping", rt.pingInit)
-		authGroup.GET("/runtimes/ping/:ping_id", rt.pingGet)
 		authGroup.POST("/runtimes/upgrade", rt.upgradeInit)
 		authGroup.GET("/runtimes/upgrade/:task_id", rt.upgradeGet)
 		authGroup.POST("/runtimes/bots", rt.createBot)
@@ -631,165 +629,15 @@ func (rt *Runtime) deleteRuntime(c *wkhttp.Context) {
 	c.ResponseOK()
 }
 
-// POST /v1/runtimes/ping — initiate ping to a daemon
-func (rt *Runtime) pingInit(c *wkhttp.Context) {
-	var req pingInitReq
-	if err := c.BindJSON(&req); err != nil {
-		c.ResponseError(errors.New("invalid request body"))
-		return
-	}
-	if req.DaemonID == "" || req.SpaceID == "" {
-		c.ResponseError(errors.New("daemon_id and space_id are required"))
-		return
-	}
-
-	loginUID := c.GetLoginUID()
-	// FLEET MIGRATION: trust JWT.space_id and only verify the agent_runtime
-	// exists in that space (no JOIN to space_member which fleet can't see).
-	if !auth.MatchesSpace(c, req.SpaceID) {
-		c.ResponseErrorWithStatus(errors.New("no permission to ping this device"), 403)
-		return
-	}
-	// 合并 plan 决策一+二 Phase 3B 补漏: pingInit 加 owner_uid 校验, 防止
-	// 同 space 内 user A 让 user B 的 daemon 来 ping (拿 RTT 等数据).
-	var accessCount int
-	if err := rt.db.session.SelectBySql(
-		`SELECT COUNT(*) FROM agent_runtime WHERE space_id = ? AND daemon_id = ? AND owner_uid = ?`,
-		req.SpaceID, req.DaemonID, loginUID,
-	).LoadOne(&accessCount); err != nil {
-		rt.Error("check daemon access", zap.Error(err))
-		c.ResponseError(errors.New("query failed"))
-		return
-	}
-	if accessCount == 0 {
-		c.ResponseErrorWithStatus(errors.New("no permission to ping this device"), 403)
-		return
-	}
-	_ = loginUID
-
-	pingID := fmt.Sprintf("ping_%d", time.Now().UnixNano())
-	entry := &pingEntry{
-		ID:       pingID,
-		DaemonID: req.DaemonID,
-		SpaceID:  req.SpaceID,
-		OwnerUID: loginUID, // v3.3.1 §C.1: persist owner so claim/get can scope by it
-		ServerTS: time.Now().UnixMilli(),
-		Status:   "pending",
-	}
-	if err := rt.db.insertPing(entry); err != nil {
-		rt.Error("insert ping", zap.Error(err))
-		c.ResponseError(errors.New("ping init failed"))
-		return
-	}
-
-	// 决策三 SSE 反向派发 (Phase A 双跑): 给该 daemon 任一 runtime 推 ping
-	// event, daemon 任一 runtime SSE goroutine 收到即唤起 ping handler
-	// (daemon dedup 按 (event_type, ping_id) 防重复). 失败不阻塞主流程 —
-	// heartbeat claimPendingPing 仍兜底.
-	if rid, rerr := rt.db.firstRuntimeIDForDaemon(req.SpaceID, req.DaemonID, loginUID); rerr == nil && rid > 0 {
-		rt.dispatchPing(rid, req.SpaceID, loginUID, pingID)
-	} else if rerr != nil {
-		rt.Warn("sse: firstRuntimeIDForDaemon (ping)", zap.Error(rerr), zap.String("daemon_id", req.DaemonID))
-	}
-
-	go func() {
-		time.Sleep(30 * time.Second)
-		rt.db.timeoutPing(pingID)
-	}()
-
-	c.Response(gin.H{"ping_id": pingID})
-}
-
-// POST /v1/daemon/ping/:ping_id — daemon reports ping result
+// POST /v1/daemon/ping/:ping_id — grayscale no-op.
+// Server Ping was removed in this PR; the daemon-side report call is
+// deleted in the follow-up PR2-daemon. Until that ships, in-flight
+// daemons may still POST here. This shim returns 200 without touching
+// any storage (runtime_ping is dropped in runtime-20260616-01), so a
+// stale daemon's report neither errors nor blocks. Delete this route
+// once PR2-daemon has rolled out everywhere.
 func (rt *Runtime) pingReport(c *wkhttp.Context) {
-	pingID := c.Param("ping_id")
-
-	entry, err := rt.db.getPing(pingID)
-	if err != nil || entry == nil {
-		c.ResponseError(errors.New("ping not found"))
-		return
-	}
-
-	ownerUID := c.MustGet("uid").(string)
-	apiSpaceID := c.MustGet("space_id").(string)
-	if entry.SpaceID != apiSpaceID {
-		c.ResponseErrorWithStatus(errors.New("no permission"), 403)
-		return
-	}
-	// v3.3.2 #2 (Jerry-Xin three-round P0): runtime_ping now carries its
-	// own owner_uid (runtime-20260606-02 migration), so reject when the
-	// row's owner doesn't match the caller. The agent_runtime EXISTS
-	// check below is necessary but not sufficient: after the 4-tuple
-	// unique key two owners can legitimately share (space, daemon),
-	// so EXISTS would pass for the wrong owner if they knew or guessed
-	// the ping id. Direct ping.owner_uid compare is the authoritative
-	// gate; the agent_runtime check stays as defense-in-depth (catches
-	// stale runtime rows / future bugs that miss the ping owner_uid
-	// plumbing). Symmetric with pingGet's v3.3.1 §C.1 (e) fix.
-	if entry.OwnerUID != ownerUID {
-		c.ResponseErrorWithStatus(errors.New("no permission"), 403)
-		return
-	}
-	var daemonMatch int
-	_ = rt.db.session.SelectBySql(
-		`SELECT COUNT(*) FROM agent_runtime WHERE space_id=? AND daemon_id=? AND owner_uid=?`,
-		entry.SpaceID, entry.DaemonID, ownerUID,
-	).LoadOne(&daemonMatch)
-	if daemonMatch == 0 {
-		c.ResponseErrorWithStatus(errors.New("no permission"), 403)
-		return
-	}
-
-	// RTT = now (server receives report) - server_ts (server dispatched via heartbeat)
-	nowMS := time.Now().UnixMilli()
-	rtt := nowMS - entry.ServerTS
-	if rtt < 0 {
-		rtt = 0
-	}
-
-	if err := rt.db.updatePingResult(pingID, nowMS, rtt); err != nil {
-		rt.Error("update ping result", zap.Error(err))
-		c.ResponseError(errors.New("update failed"))
-		return
-	}
-
 	c.Response(gin.H{"status": "ok"})
-}
-
-// GET /v1/runtimes/ping/:ping_id — get ping result
-func (rt *Runtime) pingGet(c *wkhttp.Context) {
-	pingID := c.Param("ping_id")
-	entry, err := rt.db.getPing(pingID)
-	if err != nil || entry == nil {
-		c.ResponseError(errors.New("ping not found"))
-		return
-	}
-
-	loginUID := c.GetLoginUID()
-	// FLEET MIGRATION: trust JWT.space_id (see auth.MatchesSpace).
-	if !auth.MatchesSpace(c, entry.SpaceID) {
-		c.ResponseErrorWithStatus(errors.New("no permission"), 403)
-		return
-	}
-	// v3.3.1 §C.1 (Jerry-Xin Critical, three-round): the ping row now
-	// carries its own owner_uid (runtime-20260606-02 schema migration),
-	// so the ownership check is a direct field compare — no JOIN through
-	// agent_runtime, no risk of resolving the wrong owner's row on a
-	// cross-owner daemon_id collision (the v3 §4.6 COUNT-WHERE-agent_runtime
-	// approach was a step in the right direction but the data model
-	// gap — runtime_ping without owner_uid — still let a collision
-	// produce inconsistent answers depending on which row got returned).
-	// Direct compare also saves one query per ping read.
-	if entry.OwnerUID != loginUID {
-		c.ResponseErrorWithStatus(errors.New("no permission"), 403)
-		return
-	}
-
-	c.Response(gin.H{
-		"ping_id": entry.ID,
-		"status":  entry.Status,
-		"rtt_ms":  entry.RTT,
-	})
 }
 
 func isVersionOlder(current, latest string) bool {
