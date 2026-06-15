@@ -41,6 +41,9 @@ func newProviderSnapshot(defs []providerDef) *providerSnapshot {
 	return s
 }
 
+// IsKnownKind 区分"注册表里有(无论 active/disabled)"与"完全未知"。
+// 当前各 gate 只用 IsActiveKind;此方法供 PR-C(daemon 消费)及未来 enable/
+// disable 流程区分 known-but-disabled 用,且有单测覆盖,保留。
 func (s *providerSnapshot) IsKnownKind(name string) bool {
 	_, ok := s.byName[name]
 	return ok

@@ -187,7 +187,8 @@ func (d *runtimeDB) queryLatestVersions() (map[string]string, error) {
 }
 
 // upsertLatestVersion inserts or updates a component's latest version + release_meta.
-// Called by version syncer after pulling version.json from COS.
+// Source is now the internal admin endpoint (POST /v1/internal/runtime-latest-versions);
+// the COS version syncer was removed, so this table is maintained manually.
 func (d *runtimeDB) upsertLatestVersion(component, latestVersion, releaseMeta string) error {
 	_, err := d.session.InsertBySql(
 		`INSERT INTO runtime_latest_version (component, latest_version, release_meta)
