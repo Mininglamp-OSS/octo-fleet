@@ -147,22 +147,25 @@ func (d *runtimeDB) queryBotByID(id int64) (*botModel, error) {
 // listBots's `?owner_uid=` query param. Caller must always pass the
 // authenticated loginUID; pass-through of unauthenticated input is no
 // longer supported here.
-func (d *runtimeDB) listBotsBySpace(spaceID, ownerUID, runtimeKind string) ([]*botModel, error) {
+func (d *runtimeDB) listBotsBySpace(spaceID, ownerUID, runtimeKind string, activeKinds []string) ([]*botModel, error) {
 	if ownerUID == "" {
 		return nil, errors.New("listBotsBySpace: ownerUID required (v3 §4.5)")
 	}
-	q := d.session.SelectBySql(
-		"SELECT "+botSelectColumns+` FROM bot
-		 WHERE space_id=? AND status != ?
-		   AND owner_uid=?
-		   AND (?='' OR runtime_kind=?)
-		 ORDER BY id DESC LIMIT 200`,
-		spaceID, botStatusArchived,
-		ownerUID,
-		runtimeKind, runtimeKind,
-	)
+	sql := "SELECT " + botSelectColumns + ` FROM bot
+		 WHERE space_id=? AND status != ? AND owner_uid=?
+		   AND (?='' OR runtime_kind=?)`
+	args := []interface{}{spaceID, botStatusArchived, ownerUID, runtimeKind, runtimeKind}
+	if len(activeKinds) > 0 {
+		ph := strings.Repeat("?,", len(activeKinds))
+		ph = ph[:len(ph)-1]
+		sql += " AND runtime_kind IN (" + ph + ")"
+		for _, k := range activeKinds {
+			args = append(args, k)
+		}
+	}
+	sql += " ORDER BY id DESC LIMIT 200"
 	var out []*botModel
-	if _, err := q.Load(&out); err != nil {
+	if _, err := d.session.SelectBySql(sql, args...).Load(&out); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -439,7 +442,7 @@ func (rt *Runtime) listBots(c *wkhttp.Context) {
 	// product wants it back.
 	kind := c.Query("runtime_kind")
 
-	rows, err := rt.db.listBotsBySpace(spaceID, loginUID, kind)
+	rows, err := rt.db.listBotsBySpace(spaceID, loginUID, kind, rt.providers.ActiveNames())
 	if err != nil {
 		rt.Error("listBots", zap.Error(err))
 		c.ResponseError(errors.New("list failed"))

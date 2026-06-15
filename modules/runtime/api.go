@@ -399,7 +399,7 @@ func (rt *Runtime) list(c *wkhttp.Context) {
 		return
 	}
 
-	models, err := rt.db.listBySpaceIDAndOwner(spaceID, loginUID)
+	models, err := rt.db.listBySpaceIDAndOwner(spaceID, loginUID, rt.providers.ActiveNames())
 	if err != nil {
 		rt.Error("list runtimes", zap.Error(err))
 		c.ResponseError(errors.New("query failed"))

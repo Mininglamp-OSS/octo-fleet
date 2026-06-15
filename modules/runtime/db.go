@@ -73,13 +73,14 @@ func (d *runtimeDB) queryByID(id int64) (*agentRuntimeModel, error) {
 	return m, err
 }
 
-func (d *runtimeDB) listBySpaceIDAndOwner(spaceID, ownerUID string) ([]*agentRuntimeModel, error) {
+func (d *runtimeDB) listBySpaceIDAndOwner(spaceID, ownerUID string, activeProviders []string) ([]*agentRuntimeModel, error) {
 	var list []*agentRuntimeModel
-	_, err := d.session.Select("*").From("agent_runtime").
-		Where("space_id=? AND owner_uid=?", spaceID, ownerUID).
-		OrderDir("status", false).
-		OrderAsc("name").
-		Load(&list)
+	q := d.session.Select("*").From("agent_runtime").
+		Where("space_id=? AND owner_uid=?", spaceID, ownerUID)
+	if len(activeProviders) > 0 {
+		q = q.Where("provider IN ?", activeProviders) // dbr 展开为 IN (...)
+	}
+	_, err := q.OrderDir("status", false).OrderAsc("name").Load(&list)
 	return list, err
 }
 
