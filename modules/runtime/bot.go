@@ -151,6 +151,10 @@ func (d *runtimeDB) listBotsBySpace(spaceID, ownerUID, runtimeKind string, activ
 	if ownerUID == "" {
 		return nil, errors.New("listBotsBySpace: ownerUID required (v3 §4.5)")
 	}
+	// active 为空 = 没有任何 active provider,返回空(而非退化成列出全部 bot)。
+	if len(activeKinds) == 0 {
+		return []*botModel{}, nil
+	}
 	sql := "SELECT " + botSelectColumns + ` FROM bot
 		 WHERE space_id=? AND status != ? AND owner_uid=?
 		   AND (?='' OR runtime_kind=?)`

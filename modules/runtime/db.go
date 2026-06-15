@@ -74,12 +74,14 @@ func (d *runtimeDB) queryByID(id int64) (*agentRuntimeModel, error) {
 }
 
 func (d *runtimeDB) listBySpaceIDAndOwner(spaceID, ownerUID string, activeProviders []string) ([]*agentRuntimeModel, error) {
+	// active 为空 = 没有任何 active provider 可见,返回空(而非退化成不过滤列出全部)。
+	if len(activeProviders) == 0 {
+		return []*agentRuntimeModel{}, nil
+	}
 	var list []*agentRuntimeModel
 	q := d.session.Select("*").From("agent_runtime").
-		Where("space_id=? AND owner_uid=?", spaceID, ownerUID)
-	if len(activeProviders) > 0 {
-		q = q.Where("provider IN ?", activeProviders) // dbr 展开为 IN (...)
-	}
+		Where("space_id=? AND owner_uid=?", spaceID, ownerUID).
+		Where("provider IN ?", activeProviders) // dbr 展开为 IN (...)
 	_, err := q.OrderDir("status", false).OrderAsc("name").Load(&list)
 	return list, err
 }
@@ -189,11 +191,14 @@ func (d *runtimeDB) queryLatestVersions() (map[string]string, error) {
 // upsertLatestVersion inserts or updates a component's latest version + release_meta.
 // Source is now the internal admin endpoint (POST /v1/internal/runtime-latest-versions);
 // the COS version syncer was removed, so this table is maintained manually.
+// 空 releaseMeta 表示"不更新 release_meta"——保留已有值(避免省略该字段时清空
+// daemon 自升级所需的 assets/checksums)。新行 release_meta 默认 ''。
 func (d *runtimeDB) upsertLatestVersion(component, latestVersion, releaseMeta string) error {
 	_, err := d.session.InsertBySql(
 		`INSERT INTO runtime_latest_version (component, latest_version, release_meta)
 		 VALUES (?, ?, ?)
-		 ON DUPLICATE KEY UPDATE latest_version=VALUES(latest_version), release_meta=VALUES(release_meta)`,
+		 ON DUPLICATE KEY UPDATE latest_version=VALUES(latest_version),
+		   release_meta=IF(VALUES(release_meta)='', release_meta, VALUES(release_meta))`,
 		component, latestVersion, releaseMeta,
 	).Exec()
 	return err
