@@ -222,10 +222,10 @@ func (rt *Runtime) register(c *wkhttp.Context) {
 			}
 		}
 
-		// Provider 组件升级关单（claude/codex/openclaw/hermes）：
+		// Provider 组件升级关单（claude/openclaw 等 active provider）：
 		// 按 (space, daemon_id, owner, provider, version, runtime_id) 匹配.
-		// 服务端 createComponentUpgradeTask 只允许 providerComponents 白名单创建任务，
-		// 这里无需再次白名单过滤：非白名单 provider 根本不会有对应 in-progress 任务可以关。
+		// 服务端 upgradeInit 只允许 active provider（registry IsActiveKind）创建任务，
+		// 这里无需再次过滤：非 active provider 根本不会有对应 in-progress 任务可以关。
 		if r.Version != "" {
 			rt.db.completeUpgradeIfMatchedWithRuntime(req.DaemonID, spaceID, ownerUID, r.Type, r.Version, id)
 		}
@@ -834,7 +834,11 @@ func (rt *Runtime) runSweeper() {
 			rt.Info("cleaned old ping entries", zap.Int64("count", cleaned))
 		}
 
-		rt.db.timeoutStaleUpgrades()
+		active := map[string]int{}
+		for _, n := range rt.providers.ActiveNames() {
+			active[n] = rt.providers.TimeoutSec(n)
+		}
+		rt.db.timeoutStaleUpgrades(active)
 	}
 }
 
