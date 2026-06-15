@@ -92,8 +92,14 @@ func newProviderRegistry(db *runtimeDB) *providerRegistry {
 	return r
 }
 
+// current 返回当前快照。snap 在 newProviderRegistry 里启动即 Store(fallback),
+// 正常不会为 nil；这里仍兜一层 nil（防未来 refactor 漏初始化）返回 fallback 而非 panic。
 func (r *providerRegistry) current() *providerSnapshot {
-	return r.snap.Load().(*providerSnapshot)
+	v := r.snap.Load()
+	if v == nil {
+		return fallbackProviderSnapshot()
+	}
+	return v.(*providerSnapshot)
 }
 
 func (r *providerRegistry) IsKnownKind(n string) bool  { return r.current().IsKnownKind(n) }
