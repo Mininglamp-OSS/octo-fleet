@@ -86,7 +86,7 @@ func (rt *Runtime) upgradeInit(c *wkhttp.Context) {
 	}
 }
 
-// createComponentUpgradeTask 处理 provider 组件（claude/codex/hermes/openclaw）升级。
+// createComponentUpgradeTask 处理 active provider 组件（claude/openclaw）升级。
 // 校验：runtime_id 归属当前用户、runtime.Provider == component、当前版本严格落后于 latest。
 func (rt *Runtime) createComponentUpgradeTask(c *wkhttp.Context, loginUID string, req *upgradeInitReq, daemon *agentRuntimeModel, component string) {
 	if req.RuntimeID == 0 {

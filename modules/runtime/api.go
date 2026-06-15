@@ -285,7 +285,8 @@ type upsertLatestVersionReq struct {
 }
 
 // POST /v1/internal/runtime-latest-versions — 人工维护 runtime_latest_version
-// (替代已停的 COS 同步器)。internal token 鉴权。
+// (替代已停的 COS 同步器)。专用 admin token 鉴权(OCTO_RUNTIME_ADMIN_TOKEN
+// + X-Runtime-Admin-Token),非通用 internal token。
 func (rt *Runtime) upsertLatestVersionAdmin(c *wkhttp.Context) {
 	var req upsertLatestVersionReq
 	if err := c.BindJSON(&req); err != nil {
