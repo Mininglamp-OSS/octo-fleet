@@ -2,12 +2,25 @@
 
 -- PR2-fleet: Server Ping removal.
 --
+-- ⚠️ DEPLOY ORDERING (codex review): this migration DROPs runtime_ping in the
+-- same release that removes the ping table callers. A still-running OLD fleet
+-- binary would hit the dropped table via pingInit/pingReport. Deploy safely by
+-- either (a) draining/replacing all old fleet instances before this migration
+-- runs, or (b) a stop-the-world deploy. The new binary's report route is a
+-- no-op that touches no storage, so once it's live the DROP is safe.
+--
 -- 1) Purge historical ping events from the SSE event log. Old daemons
 --    reconnect with a stale Last-Event-ID and replay id>last rows via
 --    querySince; a leftover event_type='ping' row would replay a now-
 --    removed event type. Deleting them first prevents replay hazards /
 --    cursor stalls during the grayscale window. event_type='ping' is no
 --    longer produced (dispatchPing removed in this PR).
+--
+--    Scope note (codex review): runtime_event_log is bounded by a 24h TTL
+--    sweeper (event_log.go pruneOlderThan), so this DELETE only touches at
+--    most ~24h of ping rows, not unbounded history — lock/binlog impact is
+--    bounded. If a deployment has an unusually large event_log, run this
+--    DELETE out-of-band (batched) before applying the migration instead.
 DELETE FROM `runtime_event_log` WHERE `event_type` = 'ping';
 
 -- 2) Drop the ping table. The DB layer and all callers are removed in
