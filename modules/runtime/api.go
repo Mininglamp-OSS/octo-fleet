@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -86,6 +87,7 @@ func (rt *Runtime) Route(r *wkhttp.WKHttp) {
 		// dropped — production rows may exist, DROP TABLE needs explicit
 		// data-archive evaluation (separate decision).
 		internal.POST("/bot-tasks", rt.createBotTaskDeprecated)
+		internal.POST("/runtime-latest-versions", rt.upsertLatestVersionAdmin)
 	}
 
 	authGroup := r.Group("/v1", auth.Middleware("web"))
@@ -269,6 +271,56 @@ func (rt *Runtime) listProviders(c *wkhttp.Context) {
 	}
 	c.Response(gin.H{"providers": out})
 }
+
+type upsertLatestVersionReq struct {
+	Component     string          `json:"component"`
+	LatestVersion string          `json:"latest_version"`
+	ReleaseMeta   json.RawMessage `json:"release_meta"` // 可选 JSON 对象(daemon 自升级需要 assets+checksum)
+}
+
+// POST /v1/internal/runtime-latest-versions — 人工维护 runtime_latest_version
+// (替代已停的 COS 同步器)。internal token 鉴权。
+func (rt *Runtime) upsertLatestVersionAdmin(c *wkhttp.Context) {
+	var req upsertLatestVersionReq
+	if err := c.BindJSON(&req); err != nil {
+		c.ResponseError(errors.New("invalid request body"))
+		return
+	}
+	// component 白名单:daemon / 插件 / active provider
+	valid := req.Component == componentDaemon || req.Component == componentPlugin || rt.providers.IsActiveKind(req.Component)
+	if !valid {
+		c.ResponseError(fmt.Errorf("component %q not in registry/whitelist", req.Component))
+		return
+	}
+	if !semverLike(req.LatestVersion) {
+		c.ResponseError(fmt.Errorf("latest_version %q not semver-like", req.LatestVersion))
+		return
+	}
+	if req.ReleaseMeta != nil && string(req.ReleaseMeta) != "null" {
+		if !json.Valid(req.ReleaseMeta) {
+			c.ResponseError(errors.New("release_meta must be valid JSON"))
+			return
+		}
+	}
+	releaseMeta := ""
+	if req.ReleaseMeta != nil && string(req.ReleaseMeta) != "null" {
+		releaseMeta = string(req.ReleaseMeta)
+	}
+	if err := rt.db.upsertLatestVersion(req.Component, req.LatestVersion, releaseMeta); err != nil {
+		rt.Error("admin upsert latest version", zap.Error(err))
+		c.ResponseError(errors.New("upsert failed"))
+		return
+	}
+	rt.Info("admin upserted latest version",
+		zap.String("component", req.Component), zap.String("version", req.LatestVersion))
+	c.Response(gin.H{"ok": true})
+}
+
+// semverLikeRe 宽松校验:可选 v 前缀、2-3 段数字、可选预发布/构建后缀。包级编译一次。
+var semverLikeRe = regexp.MustCompile(`^v?\d+\.\d+(\.\d+)?([-+].+)?$`)
+
+func semverLike(v string) bool { return semverLikeRe.MatchString(v) }
+
 func (rt *Runtime) heartbeat(c *wkhttp.Context) {
 	var req heartbeatReq
 	if err := c.BindJSON(&req); err != nil {
