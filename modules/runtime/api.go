@@ -166,7 +166,7 @@ func (rt *Runtime) register(c *wkhttp.Context) {
 		// 去 codex/hermes 的服务端权威过滤:老 daemon 仍探测/上报 disabled
 		// provider 时,fleet 直接丢弃不写 agent_runtime(不依赖 daemon 升级)。
 		if !rt.providers.IsActiveKind(r.Type) {
-			rt.Warn("skip disabled/unknown provider on register",
+			rt.Info("skip disabled/unknown provider on register",
 				zap.String("provider", r.Type), zap.String("daemon_id", req.DaemonID))
 			continue
 		}

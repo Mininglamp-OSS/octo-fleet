@@ -19,6 +19,12 @@ const (
 
 	daemonUpgradeTimeoutSec = 120 // 2 分钟
 	pluginUpgradeTimeoutSec = 600 // 10 分钟（npm install + 依赖 + gateway restart）
+
+	// fallbackComponentTimeoutSec 是 sweeper 对非 daemon/plugin/active component
+	// (disabled provider 残留 / 未知)的统一兜底 timeout。30min = 最大已知
+	// provider timeout(hermes 20min)的 1.5×,足够保守,确保残留 task 终会 timeout
+	// 而不会永占该 daemon 的单 in-progress 名额。
+	fallbackComponentTimeoutSec = 1800
 )
 
 // POST /v1/runtimes/upgrade
@@ -705,7 +711,7 @@ func (d *runtimeDB) timeoutStaleUpgrades(activeProviders map[string]int) {
 	// 强兜底：其余所有 component(disabled provider 残留 / 未知)统一 1800s timeout。
 	ph := placeholders(len(known)) // 复用本包 helper，勿用局部变量遮蔽
 	args := append([]interface{}{}, known...)
-	args = append(args, 1800)
+	args = append(args, fallbackComponentTimeoutSec)
 	d.session.UpdateBySql(
 		`UPDATE runtime_upgrade_task SET status='timeout', error_msg='upgrade timed out (fallback)', updated_at=NOW()
 		 WHERE component NOT IN (`+ph+`)
