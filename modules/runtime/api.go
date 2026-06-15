@@ -74,6 +74,7 @@ func (rt *Runtime) Route(r *wkhttp.WKHttp) {
 		// handler; the 410 stub remains for deploy-compatibility (stale
 		// daemons get an actionable 410 with migration hint).
 		daemon.POST("/bot-tasks/:id/ack", rt.ackBotTaskDeprecated)
+		daemon.GET("/runtime-providers", rt.listProviders)
 	}
 
 	internal := r.Group("/v1/internal", rt.internalTokenAuth())
@@ -248,7 +249,26 @@ func (rt *Runtime) register(c *wkhttp.Context) {
 	})
 }
 
-// POST /v1/daemon/heartbeat
+type providerInfo struct {
+	Name              string `json:"name"`
+	DisplayName       string `json:"display_name"`
+	BinaryName        string `json:"binary_name"`
+	UpgradeTimeoutSec int    `json:"upgrade_timeout_sec"`
+}
+
+// GET /v1/daemon/runtime-providers — daemon 拉取 active provider 列表(PR-C 消费)。
+func (rt *Runtime) listProviders(c *wkhttp.Context) {
+	snap := rt.providers.current()
+	var out []providerInfo
+	for _, name := range snap.ActiveNames() {
+		d := snap.byName[name]
+		out = append(out, providerInfo{
+			Name: d.Name, DisplayName: d.DisplayName,
+			BinaryName: d.BinaryName, UpgradeTimeoutSec: d.UpgradeTimeoutSec,
+		})
+	}
+	c.Response(gin.H{"providers": out})
+}
 func (rt *Runtime) heartbeat(c *wkhttp.Context) {
 	var req heartbeatReq
 	if err := c.BindJSON(&req); err != nil {
