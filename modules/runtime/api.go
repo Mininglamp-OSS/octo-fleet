@@ -356,14 +356,7 @@ func (rt *Runtime) heartbeat(c *wkhttp.Context) {
 		return
 	}
 
-	// Atomically claim a pending ping for this daemon (prevents duplicate dispatch)
 	resp := gin.H{"status": "ok"}
-	claimedPing, _ := rt.db.claimPendingPing(spaceID, existing.DaemonID, ownerUID, time.Now().UnixMilli())
-	if claimedPing != nil {
-		resp["pending_ping"] = gin.H{
-			"ping_id": claimedPing.ID,
-		}
-	}
 
 	// Atomically claim a pending upgrade task
 	claimedUpgrade, _ := rt.db.claimPendingUpgrade(spaceID, existing.DaemonID, ownerUID)
@@ -733,12 +726,6 @@ func (rt *Runtime) runSweeper() {
 		}
 		if deleted > 0 {
 			rt.Info("gc'd old offline runtimes", zap.Int64("count", deleted))
-		}
-
-		if cleaned, err := rt.db.cleanOldPings(5 * time.Minute); err != nil {
-			rt.Error("clean old pings", zap.Error(err))
-		} else if cleaned > 0 {
-			rt.Info("cleaned old ping entries", zap.Int64("count", cleaned))
 		}
 
 		active := map[string]int{}
