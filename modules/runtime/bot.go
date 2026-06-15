@@ -55,24 +55,6 @@ const (
 	botStatusArchived     = "archived"
 )
 
-// Runtime kinds we accept for bot creation. Only "openclaw" actually runs
-// tasks in PoC4 — the others are inert (registered but dispatch fails with
-// "runtime not supported yet"). See spec §"non-openclaw bot create flow".
-const (
-	runtimeKindOpenclaw = "openclaw"
-	runtimeKindClaude   = "claude"
-	runtimeKindCodex    = "codex"
-	runtimeKindHermes   = "hermes"
-)
-
-func isValidRuntimeKind(k string) bool {
-	switch k {
-	case runtimeKindOpenclaw, runtimeKindClaude, runtimeKindCodex, runtimeKindHermes:
-		return true
-	}
-	return false
-}
-
 // ---------- request / response ----------
 
 type createBotReq struct {
@@ -290,8 +272,9 @@ func (rt *Runtime) createBot(c *wkhttp.Context) {
 		c.ResponseError(errors.New("name required"))
 		return
 	}
-	if !isValidRuntimeKind(req.RuntimeKind) {
-		c.ResponseError(fmt.Errorf("runtime_kind must be openclaw|claude|codex|hermes, got %q", req.RuntimeKind))
+	if !rt.providers.IsActiveKind(req.RuntimeKind) {
+		c.ResponseError(fmt.Errorf("runtime_kind must be one of [%s], got %q",
+			strings.Join(rt.providers.ActiveNames(), ", "), req.RuntimeKind))
 		return
 	}
 
