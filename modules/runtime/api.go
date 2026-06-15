@@ -1,7 +1,6 @@
 package runtime
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,9 +20,10 @@ import (
 type Runtime struct {
 	ctx *config.Context
 	log.Log
-	db      runtimeDB
-	eventDB eventLogDB
-	sseHub  *sseHub
+	db        runtimeDB
+	eventDB   eventLogDB
+	sseHub    *sseHub
+	providers *providerRegistry
 }
 
 func New(ctx *config.Context) *Runtime {
@@ -34,14 +34,11 @@ func New(ctx *config.Context) *Runtime {
 		eventDB: *newEventLogDB(ctx),
 		sseHub:  newSseHub(),
 	}
+	rt.providers = newProviderRegistry(&rt.db)
+	go rt.providers.refreshLoop()
+
 	go rt.runSweeper()
 	go rt.runEventLogSweeper()
-
-	// 版本同步：从 COS 拉取 version.json 写入 runtime_latest_version。
-	// 独立 goroutine，不塞进 runSweeper，失败不影响其他扫描。
-	cfgFile := ctx.GetConfig().ConfigFileUsed()
-	syncer := newVersionSyncer(&rt.db, cfgFile)
-	go syncer.run(context.Background())
 
 	return rt
 }
