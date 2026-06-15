@@ -87,7 +87,13 @@ func (rt *Runtime) Route(r *wkhttp.WKHttp) {
 		// dropped — production rows may exist, DROP TABLE needs explicit
 		// data-archive evaluation (separate decision).
 		internal.POST("/bot-tasks", rt.createBotTaskDeprecated)
-		internal.POST("/runtime-latest-versions", rt.upsertLatestVersionAdmin)
+	}
+
+	// runtime-latest-versions 写入口权限高(能改 daemon 升级产物来源),用专用
+	// admin token 鉴权,不与上面宽泛的 NOTIFY_INTERNAL_TOKEN 共用。
+	runtimeAdmin := r.Group("/v1/internal", rt.runtimeAdminTokenAuth())
+	{
+		runtimeAdmin.POST("/runtime-latest-versions", rt.upsertLatestVersionAdmin)
 	}
 
 	authGroup := r.Group("/v1", auth.Middleware("web"))

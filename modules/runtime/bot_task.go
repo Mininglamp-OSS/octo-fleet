@@ -51,7 +51,28 @@ func (rt *Runtime) internalTokenAuth() wkhttp.HandlerFunc {
 	}
 }
 
-// createBotTaskDeprecated returns 410 Gone. PR-B.3: bot_task moved to
+// runtimeAdminTokenAuth 守护 runtime-latest-versions 写入口。该端点能改 daemon
+// 升级的下载 URL / checksum 来源,权限高于 legacy /v1/internal/* 的 410 stub,
+// 故用**专用** token(OCTO_RUNTIME_ADMIN_TOKEN + header X-Runtime-Admin-Token),
+// 不与宽泛的 NOTIFY_INTERNAL_TOKEN 共用。未配置则 fail-closed(拒绝全部)。
+func (rt *Runtime) runtimeAdminTokenAuth() wkhttp.HandlerFunc {
+	token := os.Getenv("OCTO_RUNTIME_ADMIN_TOKEN")
+	if token == "" {
+		rt.Warn("OCTO_RUNTIME_ADMIN_TOKEN not set — /v1/internal/runtime-latest-versions will reject all requests")
+	}
+	return func(c *wkhttp.Context) {
+		if token == "" {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"msg": "runtime admin API auth not configured"})
+			return
+		}
+		hdr := c.GetHeader("X-Runtime-Admin-Token")
+		if subtle.ConstantTimeCompare([]byte(hdr), []byte(token)) != 1 {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"msg": "unauthorized"})
+			return
+		}
+		c.Next()
+	}
+}
 // octo-matter, fleet no longer accepts enqueue requests. Kept as a
 // deploy-compatibility stub so stale daemons posting here get an
 // actionable 410 (with migration hint) instead of a generic 404.
