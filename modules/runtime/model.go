@@ -83,11 +83,6 @@ type registeredRuntimeResp struct {
 	Provider string `json:"provider"`
 }
 
-type pingInitReq struct {
-	DaemonID string `json:"daemon_id"`
-	SpaceID  string `json:"space_id"`
-}
-
 type upgradeInitReq struct {
 	DaemonID  string `json:"daemon_id"`
 	SpaceID   string `json:"space_id"`
@@ -139,19 +134,4 @@ type releaseAssetJSON struct {
 	OS   string `json:"os"`
 	Arch string `json:"arch"`
 	Kind string `json:"kind"`
-}
-
-type pingResultReq struct {
-	DaemonTS int64 `json:"daemon_ts"`
-}
-
-type pingEntry struct {
-	ID       string `db:"id"`
-	SpaceID  string `db:"space_id"`
-	DaemonID string `db:"daemon_id"`
-	OwnerUID string `db:"owner_uid"` // v3.3.1 §C.1: paired with runtime-20260606-02 schema migration
-	ServerTS int64  `db:"server_ts"`
-	DaemonTS int64  `db:"daemon_ts"`
-	RTT      int64  `db:"rtt_ms"`
-	Status   string `db:"status"`
 }

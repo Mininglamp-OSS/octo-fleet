@@ -1,8 +1,8 @@
 // v3 §4.1 (Phase 3B regression tests, aunknown B1)
 //
 // Guards against a future refactor silently dropping the owner_uid
-// filters that v2 added to claimPendingPing / claimPendingUpgrade /
-// claimPendingBotProvision / pingGet.
+// filters that v2 added to claimPendingUpgrade /
+// claimPendingBotProvision.
 //
 // **Why source-grep, not DB integration test?** Fleet has no integration
 // test harness today (server has testutil.NewTestServer; fleet doesn't).
@@ -107,12 +107,6 @@ func assertHasOwnerUIDFilter(t *testing.T, funcName, body string) {
 	}
 }
 
-func TestClaimPendingPing_OwnerFilterRegressionNet(t *testing.T) {
-	src := mustReadSource(t, "db.go")
-	body := extractFuncBody(t, src, "claimPendingPing")
-	assertHasOwnerUIDFilter(t, "claimPendingPing", body)
-}
-
 func TestClaimPendingUpgrade_OwnerFilterRegressionNet(t *testing.T) {
 	src := mustReadSource(t, "upgrade.go")
 	body := extractFuncBody(t, src, "claimPendingUpgrade")
@@ -129,51 +123,6 @@ func TestClaimPendingBotProvision_OwnerFilterRegressionNet(t *testing.T) {
 	// could let a Space-B daemon claim a Space-A bot provision payload.
 	if !strings.Contains(body, "space_id=?") {
 		t.Errorf("claimPendingBotProvision must scope by space_id=? (v3.3.2 #1, paired with owner_uid)")
-	}
-}
-
-// pingGet's owner check shifted across two rounds:
-//   - v3 §4.6 (yujiawei P1): SELECT owner_uid → SELECT COUNT(*) WHERE owner_uid
-//   - v3.3.1 §C.1 (Jerry-Xin Critical 三审): runtime_ping now has its own
-//     owner_uid column (runtime-20260606-02 migration), so pingGet
-//     reads entry.OwnerUID directly and compares against loginUID,
-//     dropping the COUNT round-trip entirely.
-// Regression net asserts the new shape: entry.OwnerUID direct compare
-// + assertHasOwnerUIDFilter rejects any future drift back to the
-// owner-less SELECT pattern.
-func TestPingGet_OwnerFilterRegressionNet(t *testing.T) {
-	src := mustReadSource(t, "api.go")
-	body := extractFuncBody(t, src, "pingGet")
-	if !strings.Contains(body, "entry.OwnerUID != loginUID") {
-		t.Errorf("pingGet must compare entry.OwnerUID against loginUID directly (v3.3.1 §C.1); body:\n%s", body)
-	}
-}
-
-// v3.3.2 #2 (Jerry-Xin three-round P0): pingReport must compare
-// entry.OwnerUID directly (using the new runtime_ping.owner_uid column
-// from runtime-20260606-02) — symmetric with pingGet's §C.1 (e) fix.
-// The agent_runtime EXISTS check alone isn't sufficient under the
-// post-§4.4 schema where two owners can legitimately share (space,
-// daemon_id).
-func TestPingReport_OwnerCheckRegressionNet(t *testing.T) {
-	src := mustReadSource(t, "api.go")
-	body := extractFuncBody(t, src, "pingReport")
-	if !strings.Contains(body, "entry.OwnerUID != ownerUID") {
-		t.Errorf("pingReport must compare entry.OwnerUID against ownerUID directly (v3.3.2 #2); body:\n%s", body)
-	}
-}
-
-// v3.3.1 §C.1 (Jerry-Xin Critical 1 三审): runtime_ping inserts +
-// claim/select queries must persist and filter owner_uid since the
-// column was added in runtime-20260606-02. Without these, schema
-// migration 20260606-01 (agent_runtime 4-tuple unique key allowing
-// cross-owner daemon_id sharing) leaves runtime_ping's queries to
-// ambiguously resolve which owner owns a given (space, daemon) ping row.
-func TestInsertPing_PersistsOwnerUIDRegressionNet(t *testing.T) {
-	src := mustReadSource(t, "db.go")
-	body := extractFuncBody(t, src, "insertPing")
-	if !strings.Contains(body, "owner_uid") || !strings.Contains(body, "p.OwnerUID") {
-		t.Errorf("insertPing must persist p.OwnerUID into runtime_ping.owner_uid (v3.3.1 §C.1); body:\n%s", body)
 	}
 }
 

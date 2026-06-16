@@ -16,7 +16,6 @@ import (
 // runtime_id 关联反推 (event_log 是独立表, 不 join agent_runtime).
 
 const (
-	eventTypePing               = "ping"
 	eventTypeUpgrade            = "upgrade"
 	eventTypeBotProvision       = "bot_provision"
 	eventTypeManagedBotsChanged = "managed_bots_changed"

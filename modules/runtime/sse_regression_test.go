@@ -51,7 +51,7 @@ func TestSSERegression_BotProvisionPayloadHasNoSecret(t *testing.T) {
 // 走 Last-Event-ID replay 拿不到这条 event (in-mem 推丢了, 持久化层无记录).
 func TestSSERegression_DispatchPersistsBeforePublish(t *testing.T) {
 	src := mustReadSource(t, "sse.go")
-	for _, fn := range []string{"dispatchPing", "dispatchUpgrade", "dispatchBotProvision", "dispatchManagedBotsChanged"} {
+	for _, fn := range []string{"dispatchUpgrade", "dispatchBotProvision", "dispatchManagedBotsChanged"} {
 		body := extractFuncBody(t, src, fn)
 		insertIdx := strings.Index(body, "eventDB.insert(")
 		publishIdx := strings.Index(body, "sseHub.publish(")
@@ -99,7 +99,7 @@ func TestSSERegression_FetchBotProvisionOwnershipGate(t *testing.T) {
 // 观察期 (v6 plan §4 + §E7).
 func TestSSERegression_HeartbeatStillDispatchesPendingInPhaseA(t *testing.T) {
 	body := extractFuncBody(t, mustReadSource(t, "api.go"), "heartbeat")
-	for _, fn := range []string{"claimPendingPing", "claimPendingUpgrade", "claimPendingBotProvision"} {
+	for _, fn := range []string{"claimPendingUpgrade", "claimPendingBotProvision"} {
 		if !strings.Contains(body, fn+"(") {
 			t.Errorf("heartbeat 必须仍调 %s — Phase A 双跑兜底 (v6 plan §4). 拆这个等 Phase B PR.", fn)
 		}
@@ -155,19 +155,6 @@ func TestSSERegression_FirstRuntimeFilterOnline(t *testing.T) {
 	body := extractFuncBody(t, mustReadSource(t, "db.go"), "firstRuntimeIDForDaemon")
 	if !strings.Contains(body, "status='online'") && !strings.Contains(body, `status="online"`) {
 		t.Error("firstRuntimeIDForDaemon 必须 SQL 含 status='online' 过滤 (F3: 防 SSE 推到 offline runtime 静默丢, plan §3.5)")
-	}
-}
-
-// R3-1 (codex round 3 BLOCKER): SSE fast-path 跳过 heartbeat 的 claim
-// (status pending→dispatched), 所以 daemon 经 SSE 直接 ReportPing 时 row
-// 仍是 'pending'. updatePingResult SQL 必须接受 pending|dispatched 两种
-// 起始状态, 否则 SSE 路径 affected=0 静默成功, daemon dedup mark + advance,
-// heartbeat 后续 claim 后 daemon dedup block, ping 永远卡到 timeoutPing.
-func TestSSERegression_UpdatePingResultAcceptsPending(t *testing.T) {
-	body := extractFuncBody(t, mustReadSource(t, "db.go"), "updatePingResult")
-	// SQL 必须含 status IN (..., 'pending', ...) 而非只 status='dispatched'
-	if !regexp.MustCompile(`status\s+IN\s*\([^)]*'pending'[^)]*\)`).MatchString(body) {
-		t.Error("updatePingResult SQL 必须 status IN ('pending','dispatched') 不能只 'dispatched' — SSE 路径不 claim, row 仍是 pending (R3 BLOCKER)")
 	}
 }
 

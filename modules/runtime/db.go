@@ -87,8 +87,8 @@ func (d *runtimeDB) listBySpaceIDAndOwner(spaceID, ownerUID string, activeProvid
 }
 
 // firstRuntimeIDForDaemon 解析 (space, daemon, owner) 对应的任一**在线**
-// runtime id, 用作 daemon-level SSE event (ping / daemon 自身 upgrade) 的
-// push 目标. SSE channel 是 per-runtime (决策三 v6 §Q2), 而 ping/daemon-
+// runtime id, 用作 daemon-level SSE event (daemon 自身 upgrade) 的
+// push 目标. SSE channel 是 per-runtime (决策三 v6 §Q2), 而 daemon-
 // upgrade 是 daemon 级事件 — 推到任一在线 runtime 即触发 daemon 处理
 // (daemon-side dedup 按 event_type+source_pk 防同事件多 runtime 重复处理).
 //
@@ -202,114 +202,6 @@ func (d *runtimeDB) upsertLatestVersion(component, latestVersion, releaseMeta st
 		component, latestVersion, releaseMeta,
 	).Exec()
 	return err
-}
-
-// Ping DB operations
-
-func (d *runtimeDB) insertPing(p *pingEntry) error {
-	// v3.3.1 §C.1: persist owner_uid so cross-owner daemon_id collision
-	// (allowed by runtime-20260606-01 4-tuple unique key) can't fool the
-	// later claim/get/report queries into resolving the wrong owner's row.
-	_, err := d.session.InsertBySql(
-		`INSERT INTO runtime_ping (id, space_id, daemon_id, owner_uid, server_ts, status) VALUES (?, ?, ?, ?, ?, ?)`,
-		p.ID, p.SpaceID, p.DaemonID, p.OwnerUID, p.ServerTS, p.Status,
-	).Exec()
-	return err
-}
-
-// claimPendingPing atomically claims a pending ping by setting status to 'dispatched'.
-// Returns the claimed ping entry, or nil if none pending.
-//
-// owner_uid filter (defense-in-depth, reviewer fleet#24 Jerry-Xin): same-space
-// daemon_id collision across owners is possible because register accepts
-// caller-supplied daemon_id with no cross-owner uniqueness constraint.
-//
-// v3.3.1 §C.1: now also filters on runtime_ping.owner_uid directly
-// (added by runtime-20260606-02 migration). The EXISTS subquery alone
-// was insufficient — it only checked that the caller owns SOME runtime
-// row for the (space, daemon) pair, but didn't guarantee the ping row
-// itself belonged to the caller. With both filters, a cross-owner
-// caller can neither claim the wrong owner's pending ping nor
-// accidentally bind one of their own dispatched rows to a foreign ping.
-func (d *runtimeDB) claimPendingPing(spaceID, daemonID, ownerUID string, dispatchTS int64) (*pingEntry, error) {
-	// Atomic: only one heartbeat can claim each ping
-	result, err := d.session.UpdateBySql(
-		`UPDATE runtime_ping SET status='dispatched', server_ts=?
-		 WHERE space_id=? AND daemon_id=? AND owner_uid=? AND status='pending'
-		   AND EXISTS (SELECT 1 FROM agent_runtime ar
-		               WHERE ar.space_id=runtime_ping.space_id
-		                 AND ar.daemon_id=runtime_ping.daemon_id
-		                 AND ar.owner_uid=?)
-		 ORDER BY created_at DESC LIMIT 1`,
-		dispatchTS, spaceID, daemonID, ownerUID, ownerUID,
-	).Exec()
-	if err != nil {
-		return nil, err
-	}
-	rows, _ := result.RowsAffected()
-	if rows == 0 {
-		return nil, nil
-	}
-	// Fetch the one we just claimed — v3.3.1 §C.1 scoped by owner_uid too.
-	var p *pingEntry
-	_, err = d.session.SelectBySql(
-		`SELECT id, space_id, daemon_id, owner_uid, server_ts, daemon_ts, rtt_ms, status FROM runtime_ping
-		 WHERE space_id=? AND daemon_id=? AND owner_uid=? AND status='dispatched' ORDER BY created_at DESC LIMIT 1`,
-		spaceID, daemonID, ownerUID,
-	).Load(&p)
-	return p, err
-}
-
-func (d *runtimeDB) getPing(pingID string) (*pingEntry, error) {
-	// v3.3.1 §C.1: include owner_uid so callers can compare it directly
-	// instead of round-tripping through agent_runtime.
-	var p *pingEntry
-	_, err := d.session.SelectBySql(
-		`SELECT id, space_id, daemon_id, owner_uid, server_ts, daemon_ts, rtt_ms, status FROM runtime_ping WHERE id=?`,
-		pingID,
-	).Load(&p)
-	return p, err
-}
-
-func (d *runtimeDB) updatePingResult(pingID string, daemonTS, rtt int64) error {
-	// SSE fast-path 不经 claimPendingPing (heartbeat 路径 才把 row 转 dispatched),
-	// 所以 daemon 通过 SSE 直接 ReportPing 时 row 仍是 'pending'. 接受
-	// pending|dispatched 两种起始状态 → done, 让 SSE / heartbeat 都能完成
-	// 状态转换 (codex review final BLOCKER): SQL 只接受 'dispatched' 时, SSE
-	// 路径 updatePingResult 静默 affected=0, 但 daemon 端 dedup 已 mark, 后续
-	// heartbeat 又 block 不能 re-deliver → ping 永远卡 dispatched 直到 timeoutPing.
-	_, err := d.session.UpdateBySql(
-		`UPDATE runtime_ping SET daemon_ts=?, rtt_ms=?, status='done' WHERE id=? AND status IN ('pending','dispatched')`,
-		daemonTS, rtt, pingID,
-	).Exec()
-	return err
-}
-
-func (d *runtimeDB) timeoutPing(pingID string) error {
-	_, err := d.session.UpdateBySql(
-		`UPDATE runtime_ping SET status='timeout' WHERE id=? AND status='pending'`,
-		pingID,
-	).Exec()
-	return err
-}
-
-func (d *runtimeDB) timeoutStalePending() {
-	d.session.UpdateBySql(
-		`UPDATE runtime_ping SET status='timeout' WHERE status IN ('pending','dispatched') AND created_at < DATE_SUB(NOW(), INTERVAL 60 SECOND)`,
-	).Exec()
-}
-
-func (d *runtimeDB) cleanOldPings(maxAge time.Duration) (int64, error) {
-	d.timeoutStalePending()
-	cutoff := time.Now().Add(-maxAge)
-	result, err := d.session.DeleteBySql(
-		`DELETE FROM runtime_ping WHERE status NOT IN ('pending','dispatched') AND created_at < ?`,
-		cutoff,
-	).Exec()
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
 }
 
 func formatTime(t time.Time) string {
