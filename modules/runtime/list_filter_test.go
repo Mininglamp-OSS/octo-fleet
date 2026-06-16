@@ -19,11 +19,11 @@ func TestListBySpaceIDAndOwner_EmptyActiveReturnsEmpty(t *testing.T) {
 
 func TestListBotsBySpace_EmptyActiveReturnsEmpty(t *testing.T) {
 	d := &runtimeDB{}
-	got, err := d.listBotsBySpace("space", "owner", "", nil)
+	got, total, err := d.listBotsBySpace("space", "owner", "", nil, 1, 20)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
-	if len(got) != 0 {
-		t.Errorf("empty active kinds must yield empty bot list, got %d rows", len(got))
+	if len(got) != 0 || total != 0 {
+		t.Errorf("empty active kinds must yield empty bot list, got %d rows (total %d)", len(got), total)
 	}
 }

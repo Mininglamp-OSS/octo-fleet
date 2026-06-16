@@ -2,19 +2,20 @@ package runtime
 
 import (
 	"encoding/json"
-	"errors"
-	"fmt"
-	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/Mininglamp-OSS/octo-fleet/internal/auth"
+	// swag resolves envelope.Data[...] / envelope.Error in @Success/@Failure
+	// annotations against this import (skill B章 prerequisite). Blank because
+	// handlers emit envelopes via the resp.go helpers, not direct refs.
+	_ "github.com/Mininglamp-OSS/octo-fleet/internal/envelope"
+	"github.com/Mininglamp-OSS/octo-fleet/internal/errcode"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
-	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 )
 
@@ -52,93 +53,68 @@ func (rt *Runtime) Route(r *wkhttp.WKHttp) {
 	// The earlier JWT/JWKS scheme was removed in Phase 4 of decisions 1+2
 	// (server PR #290 / fleet PR #24 / matter PR #78); fleet itself no
 	// longer holds or verifies JWTs.
-	daemon := r.Group("/v1/daemon", auth.Middleware("daemon"))
+	// Gateway mounts fleet at <host>/fleet/api/ — the `fleet/api` service
+	// segment is added by nginx and does NOT appear in the spec (A.1/R6).
+	// Paths here are /v1/<resource>; daemon vs web callers are separated by
+	// JWT scope (auth.Middleware), not by a path segment. The two groups
+	// share the /v1 prefix; gin routes by method + sub-path.
+	daemon := r.Group("/v1", auth.Middleware("daemon"))
 	{
-		daemon.POST("/register", rt.register)
-		daemon.POST("/heartbeat", rt.heartbeat)
-		daemon.POST("/deregister", rt.deregister)
-		daemon.POST("/ping/:ping_id", rt.pingReport)
-		daemon.POST("/upgrade/:task_id", rt.upgradeReport)
-		daemon.POST("/bots/:id/ack", rt.ackBot)
-		// 决策三 SSE 反向派发: long-lived push 替代 heartbeat 夹带 pending.
-		// 双跑期 (Phase A): SSE 优先, heartbeat pending dispatch 兜底.
-		// daemon 端 dedup file 去重双跑产生的重复.
-		daemon.GET("/events", rt.sseEvents)
-		// 决策三 A3: bot_provision secret fetch (token 不进 SSE stream).
-		daemon.GET("/bot-provisions/:command_id", rt.fetchBotProvision)
-		// PR-B.3: bot_task ownership moved to octo-matter; daemons ack to
-		// matter directly via POST /api/v1/internal/bot-tasks/:id/ack.
-		// Pre-cleanup, stale daemons posting here hit the (now-removed)
-		// ackBotTask handler, which UPDATEd fleet's local bot_task table
-		// AND fired writebacks to matter — that duplicated entries or
-		// fought matter's claim_token guard. v3.4 cleanup PR deleted the
-		// handler; the 410 stub remains for deploy-compatibility (stale
-		// daemons get an actionable 410 with migration hint).
-		daemon.POST("/bot-tasks/:id/ack", rt.ackBotTaskDeprecated)
-		daemon.GET("/runtime-providers", rt.listProviders)
+		daemon.POST("/runtimes", rt.register)                          // register/upsert this daemon's runtimes
+		daemon.POST("/runtimes/:runtime_id/heartbeat", rt.heartbeat)   // liveness + pull pending commands
+		daemon.POST("/runtimes/_deregister", rt.deregister)            // batch mark offline
+		daemon.GET("/runtimes/:runtime_id/events", rt.sseEvents)       // per-runtime SSE reverse-dispatch stream
+		daemon.GET("/bots/:bot_id/provision", rt.fetchBotProvision)    // fetch full bot.provision payload
+		daemon.POST("/bots/:bot_id/ack", rt.ackBot)                    // ack provision result
+		daemon.GET("/providers", rt.listProviders)                     // active runtime-provider catalog
+		daemon.POST("/upgrades/:task_id/report", rt.upgradeReport)     // report upgrade progress
 	}
 
-	internal := r.Group("/v1/internal", rt.internalTokenAuth())
+	web := r.Group("/v1", auth.Middleware("web"))
 	{
-		// PR-B.3 closed off the route; v3.4 cleanup PR removed the
-		// handler implementation. Only the 410 stub remains for
-		// stale-daemon compatibility (see ackBotTaskDeprecated above).
-		// runtime-20260601-01.sql bot_task table is intentionally NOT
-		// dropped — production rows may exist, DROP TABLE needs explicit
-		// data-archive evaluation (separate decision).
-		internal.POST("/bot-tasks", rt.createBotTaskDeprecated)
+		web.GET("/runtimes", rt.list)
+		web.DELETE("/runtimes/:runtime_id", rt.deleteRuntime)
+		web.POST("/upgrades", rt.upgradeInit)
+		web.GET("/upgrades/:task_id", rt.upgradeGet)
+		web.POST("/bots", rt.createBot)
+		web.POST("/bots/:bot_id/mint", rt.patchBotMint)
+		web.GET("/bots", rt.listBots)
+		web.GET("/bots/:bot_id", rt.getBot)
+		web.DELETE("/bots/:bot_id", rt.archiveBot)
 	}
 
-	// runtime-latest-versions 写入口权限高(能改 daemon 升级产物来源),用专用
-	// admin token 鉴权,不与上面宽泛的 NOTIFY_INTERNAL_TOKEN 共用。
-	runtimeAdmin := r.Group("/v1/internal", rt.runtimeAdminTokenAuth())
+	// runtime_latest_versions 写入口权限高(能改 daemon 升级产物来源),用专用
+	// admin token 鉴权,不与 daemon/web scope 共用。
+	admin := r.Group("/v1", rt.runtimeAdminTokenAuth())
 	{
-		runtimeAdmin.POST("/runtime-latest-versions", rt.upsertLatestVersionAdmin)
-	}
-
-	authGroup := r.Group("/v1", auth.Middleware("web"))
-	{
-		authGroup.GET("/runtimes", rt.list)
-		authGroup.DELETE("/runtimes/:id", rt.deleteRuntime)
-		authGroup.POST("/runtimes/upgrade", rt.upgradeInit)
-		authGroup.GET("/runtimes/upgrade/:task_id", rt.upgradeGet)
-		authGroup.POST("/runtimes/bots", rt.createBot)
-		// POST not PATCH because wkhttp RouterGroup wraps GET/POST/PUT/DELETE
-		// but skips PATCH. /mint sub-path keeps the semantic intent.
-		authGroup.POST("/runtimes/bots/:id/mint", rt.patchBotMint)
-		authGroup.GET("/runtimes/bots", rt.listBots)
-		authGroup.GET("/runtimes/bots/:id", rt.getBot)
-		authGroup.DELETE("/runtimes/bots/:id", rt.archiveBot)
+		admin.POST("/runtime_latest_versions", rt.upsertLatestVersionAdmin)
 	}
 }
 
-// apiKeyInfo / authAPIKey are kept dead-coded here for one release of
-// reference value. They are not wired into Route(). PR-A.2 deletes them.
-type apiKeyInfo struct {
-	UID     string
-	SpaceID string
-}
-
-func (rt *Runtime) authAPIKey() wkhttp.HandlerFunc {
-	return func(c *wkhttp.Context) {
-		_ = strings.HasPrefix // keep imports live in dead code path
-		_ = gin.H{}
-		_ = zap.Error(nil)
-		_ = http.StatusUnauthorized
-		c.AbortWithStatusJSON(http.StatusGone, gin.H{"msg": "authAPIKey deprecated in fleet — use JWT"})
-	}
-}
-
-// POST /v1/daemon/register
+// register godoc
+// @Summary      Register daemon runtimes
+// @Description  Register (upsert) this daemon's detected runtimes. Idempotent; disabled/unknown providers are dropped server-side.
+// @Tags         runtime
+// @ID           runtime.register
+// @Accept       json
+// @Produce      json
+// @Security     Bearer
+// @Param        body body registerReq true "Daemon + runtimes to register"
+// @Success      200 {object} envelope.Data[registerResp] "registered runtimes"
+// @Failure      400 {object} envelope.Error "VALIDATION_ERROR"
+// @Failure      401 {object} envelope.Error "AUTH_REQUIRED"
+// @Failure      403 {object} envelope.Error "FORBIDDEN"
+// @Failure      500 {object} envelope.Error "INTERNAL_ERROR"
+// @Router       /runtimes [post]
 func (rt *Runtime) register(c *wkhttp.Context) {
 	var req registerReq
 	if err := c.BindJSON(&req); err != nil {
 		rt.Error("bind register request", zap.Error(err))
-		c.ResponseError(errors.New("invalid request body"))
+		responseError(c, errcode.Validation)
 		return
 	}
 	if req.DaemonID == "" {
-		c.ResponseError(errors.New("daemon_id is required"))
+		responseError(c, errcode.Validation)
 		return
 	}
 
@@ -210,7 +186,7 @@ func (rt *Runtime) register(c *wkhttp.Context) {
 		id, err := rt.db.upsert(m)
 		if err != nil {
 			rt.Error("upsert runtime failed", zap.Error(err), zap.String("provider", r.Type))
-			c.ResponseError(errors.New("register failed"))
+			responseError(c, errcode.InternalError)
 			return
 		}
 
@@ -250,9 +226,7 @@ func (rt *Runtime) register(c *wkhttp.Context) {
 		rt.db.completeUpgradeIfMatched(req.DaemonID, spaceID, ownerUID, "octo-daemon", req.CLIVersion)
 	}
 
-	c.Response(gin.H{
-		"runtimes": registered,
-	})
+	ResponseData(c, registerResp{Runtimes: registered})
 }
 
 type providerInfo struct {
@@ -262,10 +236,27 @@ type providerInfo struct {
 	UpgradeTimeoutSec int    `json:"upgrade_timeout_sec"`
 }
 
-// GET /v1/daemon/runtime-providers — daemon 拉取 active provider 列表(PR-C 消费)。
+// providersResp is the listProviders payload (R1 single-object envelope).
+type providersResp struct {
+	Providers []providerInfo `json:"providers"`
+}
+
+// listProviders godoc
+// @Summary      List active runtime providers
+// @Description  Returns the active runtime-provider catalog (claude / openclaw / ...) a daemon may run. Read-only.
+// @Tags         provider
+// @ID           provider.list
+// @Accept       json
+// @Produce      json
+// @Security     Bearer
+// @Success      200 {object} envelope.Data[providersResp] "active providers"
+// @Failure      401 {object} envelope.Error "AUTH_REQUIRED"
+// @Failure      403 {object} envelope.Error "FORBIDDEN"
+// @Failure      500 {object} envelope.Error "INTERNAL_ERROR"
+// @Router       /providers [get]
 func (rt *Runtime) listProviders(c *wkhttp.Context) {
 	snap := rt.providers.current()
-	var out []providerInfo
+	out := make([]providerInfo, 0)
 	for _, name := range snap.ActiveNames() {
 		d := snap.byName[name]
 		out = append(out, providerInfo{
@@ -273,7 +264,7 @@ func (rt *Runtime) listProviders(c *wkhttp.Context) {
 			BinaryName: d.BinaryName, UpgradeTimeoutSec: d.UpgradeTimeoutSec,
 		})
 	}
-	c.Response(gin.H{"providers": out})
+	ResponseData(c, providersResp{Providers: out})
 }
 
 type upsertLatestVersionReq struct {
@@ -282,29 +273,40 @@ type upsertLatestVersionReq struct {
 	ReleaseMeta   json.RawMessage `json:"release_meta"` // 可选 JSON 对象(daemon 自升级需要 assets+checksum)
 }
 
-// POST /v1/internal/runtime-latest-versions — 人工维护 runtime_latest_version
-// (替代已停的 COS 同步器)。专用 admin token 鉴权(OCTO_RUNTIME_ADMIN_TOKEN
-// + X-Runtime-Admin-Token),非通用 internal token。
+// upsertLatestVersionAdmin godoc
+// @Summary      Upsert a component's latest version
+// @Description  Admin-only: register the latest version + optional release metadata for a component (daemon / plugin / active provider). Authenticated by the X-Runtime-Admin-Token header, not a JWT.
+// @Tags         upgrade
+// @ID           runtime_latest_version.upsert
+// @Accept       json
+// @Produce      json
+// @Param        X-Runtime-Admin-Token header string true "Admin token"
+// @Param        body body upsertLatestVersionReq true "Component version + optional release metadata"
+// @Success      200 {object} envelope.Data[envelope.EmptyResp] "upserted"
+// @Failure      400 {object} envelope.Error "VALIDATION_ERROR"
+// @Failure      401 {object} envelope.Error "AUTH_REQUIRED"
+// @Failure      500 {object} envelope.Error "INTERNAL_ERROR"
+// @Router       /runtime_latest_versions [post]
 func (rt *Runtime) upsertLatestVersionAdmin(c *wkhttp.Context) {
 	var req upsertLatestVersionReq
 	if err := c.BindJSON(&req); err != nil {
-		c.ResponseError(errors.New("invalid request body"))
+		responseError(c, errcode.Validation)
 		return
 	}
 	// component 白名单:daemon / 插件(octo + cc-octo) / active provider
 	valid := req.Component == componentDaemon || isPluginComponent(req.Component) || rt.providers.IsActiveKind(req.Component)
 	if !valid {
-		c.ResponseError(fmt.Errorf("component %q not in registry/whitelist", req.Component))
+		responseError(c, errcode.Validation)
 		return
 	}
 	if !semverLike(req.LatestVersion) {
-		c.ResponseError(fmt.Errorf("latest_version %q not semver-like", req.LatestVersion))
+		responseError(c, errcode.Validation)
 		return
 	}
 	// release_meta 可选:nil(省略)和 JSON "null" 都视为无;非空必须是合法 JSON。
 	hasReleaseMeta := req.ReleaseMeta != nil && string(req.ReleaseMeta) != "null"
 	if hasReleaseMeta && !json.Valid(req.ReleaseMeta) {
-		c.ResponseError(errors.New("release_meta must be valid JSON"))
+		responseError(c, errcode.Validation)
 		return
 	}
 	releaseMeta := ""
@@ -313,12 +315,12 @@ func (rt *Runtime) upsertLatestVersionAdmin(c *wkhttp.Context) {
 	}
 	if err := rt.db.upsertLatestVersion(req.Component, req.LatestVersion, releaseMeta); err != nil {
 		rt.Error("admin upsert latest version", zap.Error(err))
-		c.ResponseError(errors.New("upsert failed"))
+		responseError(c, errcode.InternalError)
 		return
 	}
 	rt.Info("admin upserted latest version",
 		zap.String("component", req.Component), zap.String("version", req.LatestVersion))
-	c.Response(gin.H{"ok": true})
+	ResponseEmpty(c)
 }
 
 // semverLikeRe 宽松校验:可选 v 前缀、2-3 段数字、可选预发布/构建后缀。包级编译一次。
@@ -326,48 +328,60 @@ var semverLikeRe = regexp.MustCompile(`^v?\d+\.\d+(\.\d+)?([-+].+)?$`)
 
 func semverLike(v string) bool { return semverLikeRe.MatchString(v) }
 
+// heartbeat godoc
+// @Summary      Daemon heartbeat
+// @Description  Liveness tick for one runtime. Returns reverse-dispatch piggyback (pending upgrade task / bot.provision command / managed bots) for the daemon to act on this tick.
+// @Tags         runtime
+// @ID           runtime.heartbeat
+// @Accept       json
+// @Produce      json
+// @Security     Bearer
+// @Param        runtime_id path int true "Runtime ID"
+// @Success      200 {object} envelope.Data[heartbeatResp] "dispatch piggyback"
+// @Failure      401 {object} envelope.Error "AUTH_REQUIRED"
+// @Failure      403 {object} envelope.Error "FORBIDDEN"
+// @Failure      404 {object} envelope.Error "NOT_FOUND"
+// @Failure      500 {object} envelope.Error "INTERNAL_ERROR"
+// @Router       /runtimes/{runtime_id}/heartbeat [post]
 func (rt *Runtime) heartbeat(c *wkhttp.Context) {
-	var req heartbeatReq
-	if err := c.BindJSON(&req); err != nil {
-		c.ResponseError(errors.New("invalid request body"))
-		return
-	}
-	if req.RuntimeID <= 0 {
-		c.ResponseError(errors.New("runtime_id is required"))
+	runtimeID, perr := strconv.ParseInt(c.Param("runtime_id"), 10, 64)
+	if perr != nil || runtimeID <= 0 {
+		responseError(c, errcode.Validation)
 		return
 	}
 
 	ownerUID := c.MustGet("uid").(string)
 	spaceID := c.MustGet("space_id").(string)
 
-	existing, err := rt.db.queryByID(req.RuntimeID)
+	existing, err := rt.db.queryByID(runtimeID)
 	if err != nil || existing == nil {
-		c.ResponseError(errors.New("runtime not found"))
+		responseError(c, errcode.NotFound)
 		return
 	}
 	if existing.OwnerUID != ownerUID || existing.SpaceID != spaceID {
-		c.ResponseErrorWithStatus(errors.New("no permission"), 403)
+		responseError(c, errcode.Forbidden)
 		return
 	}
 
-	if err := rt.db.updateHeartbeat(req.RuntimeID); err != nil {
-		rt.Error("update heartbeat", zap.Error(err), zap.Int64("runtime_id", req.RuntimeID))
-		c.ResponseError(errors.New("heartbeat failed"))
+	if err := rt.db.updateHeartbeat(runtimeID); err != nil {
+		rt.Error("update heartbeat", zap.Error(err), zap.Int64("runtime_id", runtimeID))
+		responseError(c, errcode.InternalError)
 		return
 	}
 
-	resp := gin.H{"status": "ok"}
+	// envelope success is implicit (top-level data); no status:ok field.
+	var resp heartbeatResp
 
 	// Atomically claim a pending upgrade task
 	claimedUpgrade, _ := rt.db.claimPendingUpgrade(spaceID, existing.DaemonID, ownerUID)
 	if claimedUpgrade != nil {
-		resp["pending_upgrade"] = gin.H{
-			"task_id":        claimedUpgrade.ID,
-			"component":      claimedUpgrade.Component,
-			"download_url":   claimedUpgrade.DownloadURL,
-			"target_version": claimedUpgrade.ToVersion,
-			"checksum":       claimedUpgrade.Checksum,
-			"metadata":       claimedUpgrade.Metadata,
+		resp.PendingUpgrade = &pendingUpgradeCmd{
+			TaskID:        claimedUpgrade.ID,
+			Component:     claimedUpgrade.Component,
+			DownloadURL:   claimedUpgrade.DownloadURL,
+			TargetVersion: claimedUpgrade.ToVersion,
+			Checksum:      claimedUpgrade.Checksum,
+			Metadata:      claimedUpgrade.Metadata,
 		}
 	}
 
@@ -376,7 +390,7 @@ func (rt *Runtime) heartbeat(c *wkhttp.Context) {
 	// + bot.add cycle.
 	claimedBot, _ := rt.db.claimPendingBotProvision(existing.DaemonID, existing.SpaceID, ownerUID, existing.Provider)
 	if claimedBot != nil {
-		resp["pending_command"] = rt.buildPendingBotProvision(claimedBot)
+		resp.PendingCommand = rt.buildPendingBotProvision(claimedBot)
 	}
 
 	// PR-B.2: managed_bots tells the daemon which bots to poll from
@@ -389,17 +403,31 @@ func (rt *Runtime) heartbeat(c *wkhttp.Context) {
 	if mberr != nil {
 		rt.Warn("listActiveBotsForDaemon failed", zap.Error(mberr), zap.String("daemon_id", existing.DaemonID))
 	} else if len(managed) > 0 {
-		resp["managed_bots"] = managed
+		resp.ManagedBots = managed
 	}
 
-	c.Response(resp)
+	ResponseData(c, resp)
 }
 
-// POST /v1/daemon/deregister
+// deregister godoc
+// @Summary      Deregister runtimes
+// @Description  Batch-mark this daemon's runtimes offline. Idempotent; unknown ids are skipped.
+// @Tags         runtime
+// @ID           runtime.deregister
+// @Accept       json
+// @Produce      json
+// @Security     Bearer
+// @Param        body body deregisterReq true "runtime_ids to mark offline"
+// @Success      200 {object} envelope.Data[envelope.EmptyResp] "deregistered"
+// @Failure      400 {object} envelope.Error "VALIDATION_ERROR"
+// @Failure      401 {object} envelope.Error "AUTH_REQUIRED"
+// @Failure      403 {object} envelope.Error "FORBIDDEN"
+// @Failure      500 {object} envelope.Error "INTERNAL_ERROR"
+// @Router       /runtimes/_deregister [post]
 func (rt *Runtime) deregister(c *wkhttp.Context) {
 	var req deregisterReq
 	if err := c.BindJSON(&req); err != nil {
-		c.ResponseError(errors.New("invalid request body"))
+		responseError(c, errcode.Validation)
 		return
 	}
 
@@ -410,33 +438,47 @@ func (rt *Runtime) deregister(c *wkhttp.Context) {
 		existing, err := rt.db.queryByID(id)
 		if err != nil {
 			rt.Error("query runtime for deregister", zap.Error(err), zap.Int64("id", id))
-			c.ResponseError(errors.New("query failed"))
+			responseError(c, errcode.InternalError)
 			return
 		}
 		if existing == nil {
 			continue
 		}
 		if existing.OwnerUID != ownerUID || existing.SpaceID != spaceID {
-			c.ResponseErrorWithStatus(errors.New("no permission"), 403)
+			responseError(c, errcode.Forbidden)
 			return
 		}
 	}
 
 	if err := rt.db.setOffline(req.RuntimeIDs); err != nil {
 		rt.Error("deregister runtimes", zap.Error(err))
-		c.ResponseError(errors.New("deregister failed"))
+		responseError(c, errcode.InternalError)
 		return
 	}
 
 	rt.Info("daemon deregistered", zap.Int("count", len(req.RuntimeIDs)))
-	c.ResponseOK()
+	ResponseEmpty(c)
 }
 
-// GET /v1/runtimes?space_id=xxx
+// list godoc
+// @Summary      List runtimes in a space
+// @Description  Aggregate view for the runtime management UI: the caller's runtimes plus per-runtime / per-daemon update hints and in-progress upgrades. Single object (not paginated); the set is small (one user's devices).
+// @Tags         runtime
+// @ID           runtime.list
+// @Accept       json
+// @Produce      json
+// @Security     Bearer
+// @Param        space_id query string true "Space ID"
+// @Success      200 {object} envelope.Data[runtimesView] "runtimes + hints"
+// @Failure      400 {object} envelope.Error "VALIDATION_ERROR"
+// @Failure      401 {object} envelope.Error "AUTH_REQUIRED"
+// @Failure      403 {object} envelope.Error "FORBIDDEN"
+// @Failure      500 {object} envelope.Error "INTERNAL_ERROR"
+// @Router       /runtimes [get]
 func (rt *Runtime) list(c *wkhttp.Context) {
 	spaceID := c.Query("space_id")
 	if spaceID == "" {
-		c.ResponseError(errors.New("space_id is required"))
+		responseError(c, errcode.Validation)
 		return
 	}
 
@@ -445,14 +487,14 @@ func (rt *Runtime) list(c *wkhttp.Context) {
 	// JWT issuer already validated membership at issue time; trust the
 	// space_id claim instead.
 	if !auth.MatchesSpace(c, spaceID) {
-		c.ResponseErrorWithStatus(errors.New("no permission to access this space"), 403)
+		responseError(c, errcode.Forbidden)
 		return
 	}
 
 	models, err := rt.db.listBySpaceIDAndOwner(spaceID, loginUID, rt.providers.ActiveNames())
 	if err != nil {
 		rt.Error("list runtimes", zap.Error(err))
-		c.ResponseError(errors.New("query failed"))
+		responseError(c, errcode.InternalError)
 		return
 	}
 
@@ -471,23 +513,23 @@ func (rt *Runtime) list(c *wkhttp.Context) {
 	}
 
 	// Build version hints per runtime_id
-	versionHints := make(map[int64]gin.H)
+	versionHints := make(map[int64]versionHint)
 	if latestVersions != nil {
 		for _, r := range list {
-			hint := gin.H{}
+			var hint versionHint
 			hasHint := false
 
 			if latest, ok := latestVersions[r.Provider]; ok && latest != "" && r.Version != "" {
 				if isVersionOlder(r.Version, latest) {
-					hint["has_update"] = true
-					hint["latest_version"] = latest
+					hint.HasUpdate = true
+					hint.LatestVersion = latest
 					hasHint = true
 				}
 			}
 
 			if pluginHas, pluginLatest := computePluginHint(r.Provider, r.Metadata, latestVersions); pluginHas {
-				hint["plugin_has_update"] = true
-				hint["plugin_latest_version"] = pluginLatest
+				hint.PluginHasUpdate = true
+				hint.PluginLatestVersion = pluginLatest
 				hasHint = true
 			}
 
@@ -498,7 +540,7 @@ func (rt *Runtime) list(c *wkhttp.Context) {
 	}
 
 	// Build daemon version hints per daemon_id
-	daemonVersionHints := make(map[string]gin.H)
+	daemonVersionHints := make(map[string]daemonVersionHint)
 	if latestVersions != nil {
 		if daemonLatest, ok := latestVersions["octo-daemon"]; ok && daemonLatest != "" {
 			seen := make(map[string]bool)
@@ -513,10 +555,10 @@ func (rt *Runtime) list(c *wkhttp.Context) {
 				}
 				cliVer, _ := meta["cli_version"].(string)
 				if cliVer != "" && isVersionOlder(cliVer, daemonLatest) {
-					daemonVersionHints[r.DaemonID] = gin.H{
-						"has_update":     true,
-						"latest_version": daemonLatest,
-						"current":        cliVer,
+					daemonVersionHints[r.DaemonID] = daemonVersionHint{
+						HasUpdate:     true,
+						LatestVersion: daemonLatest,
+						Current:       cliVer,
 					}
 				}
 			}
@@ -564,59 +606,63 @@ func (rt *Runtime) list(c *wkhttp.Context) {
 		activeUpgrades = append(activeUpgrades, item)
 	}
 
-	c.Response(gin.H{
-		"runtimes":             list,
-		"version_hints":        versionHints,
-		"daemon_version_hints": daemonVersionHints,
-		"active_upgrades":      activeUpgrades,
+	ResponseData(c, runtimesView{
+		Runtimes:           list,
+		VersionHints:       versionHints,
+		DaemonVersionHints: daemonVersionHints,
+		ActiveUpgrades:     activeUpgrades,
 	})
 }
 
-// DELETE /v1/runtimes/:id
+// deleteRuntime godoc
+// @Summary      Delete a runtime
+// @Description  Hard-delete a runtime the caller owns.
+// @Tags         runtime
+// @ID           runtime.delete
+// @Accept       json
+// @Produce      json
+// @Security     Bearer
+// @Param        runtime_id path int true "Runtime ID"
+// @Success      200 {object} envelope.Data[envelope.EmptyResp] "deleted"
+// @Failure      400 {object} envelope.Error "VALIDATION_ERROR"
+// @Failure      401 {object} envelope.Error "AUTH_REQUIRED"
+// @Failure      403 {object} envelope.Error "FORBIDDEN"
+// @Failure      404 {object} envelope.Error "NOT_FOUND"
+// @Failure      500 {object} envelope.Error "INTERNAL_ERROR"
+// @Router       /runtimes/{runtime_id} [delete]
 func (rt *Runtime) deleteRuntime(c *wkhttp.Context) {
-	idStr := c.Param("id")
+	idStr := c.Param("runtime_id")
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
-		c.ResponseError(errors.New("invalid runtime id"))
+		responseError(c, errcode.Validation)
 		return
 	}
 
 	existing, err := rt.db.queryByID(id)
 	if err != nil {
 		rt.Error("query runtime for delete", zap.Error(err))
-		c.ResponseError(errors.New("query failed"))
+		responseError(c, errcode.InternalError)
 		return
 	}
 	if existing == nil {
-		c.ResponseError(errors.New("runtime not found"))
+		responseError(c, errcode.NotFound)
 		return
 	}
 
 	loginUID := c.GetLoginUID()
 	if existing.OwnerUID != loginUID {
-		c.ResponseErrorWithStatus(errors.New("no permission to delete this runtime"), 403)
+		responseError(c, errcode.Forbidden)
 		return
 	}
 
 	if err := rt.db.deleteByID(id); err != nil {
 		rt.Error("delete runtime", zap.Error(err))
-		c.ResponseError(errors.New("delete failed"))
+		responseError(c, errcode.InternalError)
 		return
 	}
 
 	rt.Info("runtime deleted", zap.Int64("id", id), zap.String("provider", existing.Provider))
-	c.ResponseOK()
-}
-
-// POST /v1/daemon/ping/:ping_id — grayscale no-op.
-// Server Ping was removed in this PR; the daemon-side report call is
-// deleted in the follow-up PR2-daemon. Until that ships, in-flight
-// daemons may still POST here. This shim returns 200 without touching
-// any storage (runtime_ping is dropped in runtime-20260616-01), so a
-// stale daemon's report neither errors nor blocks. Delete this route
-// once PR2-daemon has rolled out everywhere.
-func (rt *Runtime) pingReport(c *wkhttp.Context) {
-	c.Response(gin.H{"status": "ok"})
+	ResponseEmpty(c)
 }
 
 func isVersionOlder(current, latest string) bool {

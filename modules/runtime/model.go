@@ -52,9 +52,6 @@ type agentInfo struct {
 	Routes   []string `json:"routes,omitempty"`
 }
 
-type heartbeatReq struct {
-	RuntimeID int64 `json:"runtime_id"`
-}
 
 type deregisterReq struct {
 	RuntimeIDs []int64 `json:"runtime_ids"`
@@ -73,9 +70,9 @@ type runtimeResp struct {
 	DeviceInfo  string `json:"device_info"`
 	Metadata    string `json:"metadata"`
 	OwnerUID    string `json:"owner_uid"`
-	LastSeenAt  string `json:"last_seen_at"`
-	CreatedAt   string `json:"created_at"`
-	UpdatedAt   string `json:"updated_at"`
+	LastSeenAt  string `json:"last_seen_at" swaggertype:"string,date-time"`
+	CreatedAt   string `json:"created_at" swaggertype:"string,date-time"`
+	UpdatedAt   string `json:"updated_at" swaggertype:"string,date-time"`
 }
 
 type registeredRuntimeResp struct {
@@ -134,4 +131,87 @@ type releaseAssetJSON struct {
 	OS   string `json:"os"`
 	Arch string `json:"arch"`
 	Kind string `json:"kind"`
+}
+
+// --- named response payloads (R1) for swag schema generation ---
+
+// registerResp is the POST /runtimes response.
+type registerResp struct {
+	Runtimes []registeredRuntimeResp `json:"runtimes"`
+}
+
+// pendingUpgradeCmd is a heartbeat-piggybacked upgrade task for the daemon.
+type pendingUpgradeCmd struct {
+	TaskID        string `json:"task_id"`
+	Component     string `json:"component"`
+	DownloadURL   string `json:"download_url" swaggertype:"string,uri"`
+	TargetVersion string `json:"target_version"`
+	Checksum      string `json:"checksum"`
+	Metadata      string `json:"metadata"`
+}
+
+// botProvisionCmd is the heartbeat-piggybacked bot.provision command.
+type botProvisionCmd struct {
+	ID          int64  `json:"id"`
+	Action      string `json:"action"`
+	RuntimeKind string `json:"runtime_kind"`
+	WorkspaceID string `json:"workspace_id"`
+	DisplayName string `json:"display_name"`
+	BotUID      string `json:"bot_uid"`
+	BotToken    string `json:"bot_token"`
+	ClaimToken  string `json:"claim_token"`
+}
+
+// managedBot is one entry in heartbeat managed_bots — bots the daemon must
+// poll matter for. Also the row type for listActiveBotsForDaemon.
+type managedBot struct {
+	BotUID      string `json:"bot_uid" db:"bot_uid"`
+	WorkspaceID string `json:"workspace_id" db:"workspace_id"`
+}
+
+// heartbeatResp is the POST /runtimes/{runtime_id}/heartbeat response —
+// reverse-dispatch piggybacked on the daemon's liveness tick.
+type heartbeatResp struct {
+	PendingUpgrade *pendingUpgradeCmd `json:"pending_upgrade,omitempty"`
+	PendingCommand *botProvisionCmd   `json:"pending_command,omitempty"`
+	ManagedBots    []managedBot       `json:"managed_bots,omitempty"`
+}
+
+// versionHint flags an available update for one runtime (per runtime_id).
+type versionHint struct {
+	HasUpdate           bool   `json:"has_update,omitempty"`
+	LatestVersion       string `json:"latest_version,omitempty"`
+	PluginHasUpdate     bool   `json:"has_plugin_update,omitempty"`
+	PluginLatestVersion string `json:"plugin_latest_version,omitempty"`
+}
+
+// daemonVersionHint flags an available daemon (CLI) update (per daemon_id).
+type daemonVersionHint struct {
+	HasUpdate     bool   `json:"has_update,omitempty"`
+	LatestVersion string `json:"latest_version,omitempty"`
+	Current       string `json:"current,omitempty"`
+}
+
+// runtimesView is the GET /runtimes aggregate (list + per-id/per-daemon
+// update hints + in-progress upgrades). Single-object envelope, not paginated.
+type runtimesView struct {
+	Runtimes           []runtimeResp                `json:"runtimes"`
+	VersionHints       map[int64]versionHint        `json:"version_hints"`
+	DaemonVersionHints map[string]daemonVersionHint `json:"daemon_version_hints"`
+	ActiveUpgrades     []activeUpgradeItem          `json:"active_upgrades"`
+}
+
+// upgradeInitResp is the POST /upgrades response.
+type upgradeInitResp struct {
+	TaskID string `json:"task_id"`
+}
+
+// upgradeGetResp is the GET /upgrades/{task_id} response.
+type upgradeGetResp struct {
+	ID          string `json:"id"`
+	Component   string `json:"component"`
+	Status      string `json:"status"`
+	FromVersion string `json:"from_version"`
+	ToVersion   string `json:"to_version"`
+	ErrorMsg    string `json:"error_msg"`
 }

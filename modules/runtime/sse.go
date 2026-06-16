@@ -2,7 +2,6 @@ package runtime
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	_ "github.com/Mininglamp-OSS/octo-fleet/internal/envelope" // swag @Failure type resolution
+	"github.com/Mininglamp-OSS/octo-fleet/internal/errcode"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
 	"go.uber.org/zap"
 )
@@ -149,14 +150,25 @@ func (h *sseHub) publish(runtimeID int64, ev eventEnvelope) {
 //  6. 从 event_log replay missed events (>lastEventID, 最多 sseReplayLimit)
 //  7. 注册 channel 入 hub
 //  8. select loop: event push / 30s keepalive / 60s TTL close / ctx.Done
+//
+// sseEvents godoc
+// @Summary      Daemon event stream (SSE)
+// @Description  Long-lived Server-Sent Events stream for reverse-dispatch (upgrade / bot_provision / managed_bots_changed). Resumable via Last-Event-ID; 60s TTL forces reconnect + re-verify. Success body is text/event-stream, not JSON.
+// @Tags         event
+// @ID           event.stream
+// @Security     Bearer
+// @Param        runtime_id   path   int    true  "Runtime ID to subscribe"
+// @Param        Last-Event-ID header string false "Resume from this event id"
+// @Success      200 "SSE stream over text/event-stream (not a JSON body, so no content schema is declared). Connection-level errors (invalid runtime_id → 400, auth → 401/403, internal → 500) are returned as a JSON envelope.Error by middleware before the stream opens."
+// @Router       /runtimes/{runtime_id}/events [get]
 func (rt *Runtime) sseEvents(c *wkhttp.Context) {
 	ownerUID := c.MustGet("uid").(string)
 	spaceID := c.MustGet("space_id").(string)
 
-	runtimeIDStr := c.Query("runtime_id")
+	runtimeIDStr := c.Param("runtime_id")
 	runtimeID, err := strconv.ParseInt(runtimeIDStr, 10, 64)
 	if err != nil || runtimeID <= 0 {
-		c.ResponseError(errors.New("invalid runtime_id"))
+		responseError(c, errcode.Validation)
 		return
 	}
 
@@ -166,12 +178,12 @@ func (rt *Runtime) sseEvents(c *wkhttp.Context) {
 	own, err := rt.db.queryByID(runtimeID)
 	if err != nil {
 		rt.Error("sse: query runtime by id", zap.Error(err), zap.Int64("runtime_id", runtimeID))
-		c.ResponseErrorWithStatus(errors.New("internal error"), http.StatusInternalServerError)
+		responseError(c, errcode.InternalError)
 		return
 	}
 	if own == nil || own.OwnerUID != ownerUID || own.SpaceID != spaceID {
 		// 不区分 not found vs no permission, 防 enumeration.
-		c.ResponseErrorWithStatus(errors.New("runtime not found or no permission"), http.StatusForbidden)
+		responseError(c, errcode.Forbidden)
 		return
 	}
 
