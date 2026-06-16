@@ -19,22 +19,13 @@ const (
 
 	daemonUpgradeTimeoutSec = 120 // 2 分钟
 	pluginUpgradeTimeoutSec = 600 // 10 分钟（npm install + 依赖 + gateway restart）
+
+	// fallbackComponentTimeoutSec 是 sweeper 对非 daemon/plugin/active component
+	// (disabled provider 残留 / 未知)的统一兜底 timeout。30min = 最大已知
+	// provider timeout(hermes 20min)的 1.5×,足够保守,确保残留 task 终会 timeout
+	// 而不会永占该 daemon 的单 in-progress 名额。
+	fallbackComponentTimeoutSec = 1800
 )
-
-// providerComponents 是允许远程升级的 provider 组件白名单（对应 agent_runtime.provider）。
-// 每个都是 1 daemon × 1 runtime 的关系；升级命令由各自 CLI 自带的 update 子命令负责。
-// 服务端 timeout 统一比 daemon 侧 exec timeout 略长，避免 daemon 还没来得及上报 failed 就 timeout。
-var providerComponents = map[string]int{
-	"claude":   600,  // 10 min
-	"codex":    600,  // 10 min
-	"openclaw": 720,  // 12 min（npm install + gateway restart）
-	"hermes":   1200, // 20 min（git pull + pip reinstall）
-}
-
-func isProviderComponent(c string) bool {
-	_, ok := providerComponents[c]
-	return ok
-}
 
 // POST /v1/runtimes/upgrade
 func (rt *Runtime) upgradeInit(c *wkhttp.Context) {
@@ -88,14 +79,14 @@ func (rt *Runtime) upgradeInit(c *wkhttp.Context) {
 		rt.createDaemonUpgradeTask(c, loginUID, &req, &daemon)
 	case component == componentPlugin:
 		rt.createPluginUpgradeTask(c, loginUID, &req, &daemon)
-	case isProviderComponent(component):
+	case rt.providers.IsActiveKind(component):
 		rt.createComponentUpgradeTask(c, loginUID, &req, &daemon, component)
 	default:
 		c.ResponseError(fmt.Errorf("unsupported component: %s", component))
 	}
 }
 
-// createComponentUpgradeTask 处理 provider 组件（claude/codex/hermes/openclaw）升级。
+// createComponentUpgradeTask 处理 active provider 组件（claude/openclaw）升级。
 // 校验：runtime_id 归属当前用户、runtime.Provider == component、当前版本严格落后于 latest。
 func (rt *Runtime) createComponentUpgradeTask(c *wkhttp.Context, loginUID string, req *upgradeInitReq, daemon *agentRuntimeModel, component string) {
 	if req.RuntimeID == 0 {
@@ -685,8 +676,10 @@ func (d *runtimeDB) completeUpgradeIfMatchedWithRuntime(daemonID, spaceID, owner
 	}
 }
 
-// sweeper：按 component 差异化 timeout
-func (d *runtimeDB) timeoutStaleUpgrades() {
+// sweeper：按 component 差异化 timeout。activeProviders 来自 provider registry。
+// 兜底：任何非 daemon/plugin/active 的 in-progress task(如残留 disabled provider)
+// 也必须被统一 timeout，否则它会永占该 daemon 的单 in-progress 名额、锁死后续升级。
+func (d *runtimeDB) timeoutStaleUpgrades(activeProviders map[string]int) {
 	// octo-daemon: 120s，完整 5 态机
 	d.session.UpdateBySql(
 		`UPDATE runtime_upgrade_task SET status='timeout', error_msg='upgrade timed out', updated_at=NOW()
@@ -703,8 +696,10 @@ func (d *runtimeDB) timeoutStaleUpgrades() {
 		 AND updated_at < DATE_SUB(NOW(), INTERVAL ? SECOND)`,
 		componentPlugin, pluginUpgradeTimeoutSec,
 	).Exec()
-	// provider 组件（claude/codex/openclaw/hermes）：各自 timeout，3 态机
-	for component, timeoutSec := range providerComponents {
+	// active provider 组件：各自 timeout，3 态机
+	known := []interface{}{componentDaemon, componentPlugin}
+	for component, timeoutSec := range activeProviders {
+		known = append(known, component)
 		d.session.UpdateBySql(
 			`UPDATE runtime_upgrade_task SET status='timeout', error_msg='upgrade timed out', updated_at=NOW()
 			 WHERE component=?
@@ -713,6 +708,17 @@ func (d *runtimeDB) timeoutStaleUpgrades() {
 			component, timeoutSec,
 		).Exec()
 	}
+	// 强兜底：其余所有 component(disabled provider 残留 / 未知)统一 1800s timeout。
+	ph := placeholders(len(known)) // 复用本包 helper，勿用局部变量遮蔽
+	args := append([]interface{}{}, known...)
+	args = append(args, fallbackComponentTimeoutSec)
+	d.session.UpdateBySql(
+		`UPDATE runtime_upgrade_task SET status='timeout', error_msg='upgrade timed out (fallback)', updated_at=NOW()
+		 WHERE component NOT IN (`+ph+`)
+		 AND status IN ('pending','dispatched','downloading','installing','restarting')
+		 AND updated_at < DATE_SUB(NOW(), INTERVAL ? SECOND)`,
+		args...,
+	).Exec()
 }
 
 // helpers

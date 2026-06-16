@@ -55,24 +55,6 @@ const (
 	botStatusArchived     = "archived"
 )
 
-// Runtime kinds we accept for bot creation. Only "openclaw" actually runs
-// tasks in PoC4 — the others are inert (registered but dispatch fails with
-// "runtime not supported yet"). See spec §"non-openclaw bot create flow".
-const (
-	runtimeKindOpenclaw = "openclaw"
-	runtimeKindClaude   = "claude"
-	runtimeKindCodex    = "codex"
-	runtimeKindHermes   = "hermes"
-)
-
-func isValidRuntimeKind(k string) bool {
-	switch k {
-	case runtimeKindOpenclaw, runtimeKindClaude, runtimeKindCodex, runtimeKindHermes:
-		return true
-	}
-	return false
-}
-
 // ---------- request / response ----------
 
 type createBotReq struct {
@@ -165,22 +147,29 @@ func (d *runtimeDB) queryBotByID(id int64) (*botModel, error) {
 // listBots's `?owner_uid=` query param. Caller must always pass the
 // authenticated loginUID; pass-through of unauthenticated input is no
 // longer supported here.
-func (d *runtimeDB) listBotsBySpace(spaceID, ownerUID, runtimeKind string) ([]*botModel, error) {
+func (d *runtimeDB) listBotsBySpace(spaceID, ownerUID, runtimeKind string, activeKinds []string) ([]*botModel, error) {
 	if ownerUID == "" {
 		return nil, errors.New("listBotsBySpace: ownerUID required (v3 §4.5)")
 	}
-	q := d.session.SelectBySql(
-		"SELECT "+botSelectColumns+` FROM bot
-		 WHERE space_id=? AND status != ?
-		   AND owner_uid=?
-		   AND (?='' OR runtime_kind=?)
-		 ORDER BY id DESC LIMIT 200`,
-		spaceID, botStatusArchived,
-		ownerUID,
-		runtimeKind, runtimeKind,
-	)
+	// active 为空 = 没有任何 active provider,返回空(而非退化成列出全部 bot)。
+	if len(activeKinds) == 0 {
+		return []*botModel{}, nil
+	}
+	sql := "SELECT " + botSelectColumns + ` FROM bot
+		 WHERE space_id=? AND status != ? AND owner_uid=?
+		   AND (?='' OR runtime_kind=?)`
+	args := []interface{}{spaceID, botStatusArchived, ownerUID, runtimeKind, runtimeKind}
+	if len(activeKinds) > 0 {
+		ph := strings.Repeat("?,", len(activeKinds))
+		ph = ph[:len(ph)-1]
+		sql += " AND runtime_kind IN (" + ph + ")"
+		for _, k := range activeKinds {
+			args = append(args, k)
+		}
+	}
+	sql += " ORDER BY id DESC LIMIT 200"
 	var out []*botModel
-	if _, err := q.Load(&out); err != nil {
+	if _, err := d.session.SelectBySql(sql, args...).Load(&out); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -290,8 +279,9 @@ func (rt *Runtime) createBot(c *wkhttp.Context) {
 		c.ResponseError(errors.New("name required"))
 		return
 	}
-	if !isValidRuntimeKind(req.RuntimeKind) {
-		c.ResponseError(fmt.Errorf("runtime_kind must be openclaw|claude|codex|hermes, got %q", req.RuntimeKind))
+	if !rt.providers.IsActiveKind(req.RuntimeKind) {
+		c.ResponseError(fmt.Errorf("runtime_kind must be one of [%s], got %q",
+			strings.Join(rt.providers.ActiveNames(), ", "), req.RuntimeKind))
 		return
 	}
 
@@ -456,7 +446,7 @@ func (rt *Runtime) listBots(c *wkhttp.Context) {
 	// product wants it back.
 	kind := c.Query("runtime_kind")
 
-	rows, err := rt.db.listBotsBySpace(spaceID, loginUID, kind)
+	rows, err := rt.db.listBotsBySpace(spaceID, loginUID, kind, rt.providers.ActiveNames())
 	if err != nil {
 		rt.Error("listBots", zap.Error(err))
 		c.ResponseError(errors.New("list failed"))

@@ -73,13 +73,16 @@ func (d *runtimeDB) queryByID(id int64) (*agentRuntimeModel, error) {
 	return m, err
 }
 
-func (d *runtimeDB) listBySpaceIDAndOwner(spaceID, ownerUID string) ([]*agentRuntimeModel, error) {
+func (d *runtimeDB) listBySpaceIDAndOwner(spaceID, ownerUID string, activeProviders []string) ([]*agentRuntimeModel, error) {
+	// active 为空 = 没有任何 active provider 可见,返回空(而非退化成不过滤列出全部)。
+	if len(activeProviders) == 0 {
+		return []*agentRuntimeModel{}, nil
+	}
 	var list []*agentRuntimeModel
-	_, err := d.session.Select("*").From("agent_runtime").
+	q := d.session.Select("*").From("agent_runtime").
 		Where("space_id=? AND owner_uid=?", spaceID, ownerUID).
-		OrderDir("status", false).
-		OrderAsc("name").
-		Load(&list)
+		Where("provider IN ?", activeProviders) // dbr 展开为 IN (...)
+	_, err := q.OrderDir("status", false).OrderAsc("name").Load(&list)
 	return list, err
 }
 
@@ -186,12 +189,16 @@ func (d *runtimeDB) queryLatestVersions() (map[string]string, error) {
 }
 
 // upsertLatestVersion inserts or updates a component's latest version + release_meta.
-// Called by version syncer after pulling version.json from COS.
+// Source is now the internal admin endpoint (POST /v1/internal/runtime-latest-versions);
+// the COS version syncer was removed, so this table is maintained manually.
+// 空 releaseMeta 表示"不更新 release_meta"——保留已有值(避免省略该字段时清空
+// daemon 自升级所需的 assets/checksums)。新行 release_meta 默认 ''。
 func (d *runtimeDB) upsertLatestVersion(component, latestVersion, releaseMeta string) error {
 	_, err := d.session.InsertBySql(
 		`INSERT INTO runtime_latest_version (component, latest_version, release_meta)
 		 VALUES (?, ?, ?)
-		 ON DUPLICATE KEY UPDATE latest_version=VALUES(latest_version), release_meta=VALUES(release_meta)`,
+		 ON DUPLICATE KEY UPDATE latest_version=VALUES(latest_version),
+		   release_meta=IF(VALUES(release_meta)='', release_meta, VALUES(release_meta))`,
 		component, latestVersion, releaseMeta,
 	).Exec()
 	return err
@@ -404,4 +411,13 @@ func (d *runtimeDB) listActiveBotsForDaemon(daemonID, spaceID, ownerUID string) 
 		out[i].WorkspaceID = r.WorkspaceID
 	}
 	return out, nil
+}
+
+// loadProviders 读取 runtime_provider 全表，供 providerRegistry 刷新快照。
+func (d *runtimeDB) loadProviders() ([]providerDef, error) {
+	var rows []providerDef
+	_, err := d.session.SelectBySql(
+		"SELECT name, display_name, binary_name, upgrade_timeout_sec, status FROM runtime_provider ORDER BY sort_order ASC, name ASC",
+	).Load(&rows)
+	return rows, err
 }

@@ -1,11 +1,11 @@
 package runtime
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -21,9 +21,10 @@ import (
 type Runtime struct {
 	ctx *config.Context
 	log.Log
-	db      runtimeDB
-	eventDB eventLogDB
-	sseHub  *sseHub
+	db        runtimeDB
+	eventDB   eventLogDB
+	sseHub    *sseHub
+	providers *providerRegistry
 }
 
 func New(ctx *config.Context) *Runtime {
@@ -34,14 +35,11 @@ func New(ctx *config.Context) *Runtime {
 		eventDB: *newEventLogDB(ctx),
 		sseHub:  newSseHub(),
 	}
+	rt.providers = newProviderRegistry(&rt.db)
+	go rt.providers.refreshLoop()
+
 	go rt.runSweeper()
 	go rt.runEventLogSweeper()
-
-	// 版本同步：从 COS 拉取 version.json 写入 runtime_latest_version。
-	// 独立 goroutine，不塞进 runSweeper，失败不影响其他扫描。
-	cfgFile := ctx.GetConfig().ConfigFileUsed()
-	syncer := newVersionSyncer(&rt.db, cfgFile)
-	go syncer.run(context.Background())
 
 	return rt
 }
@@ -77,6 +75,7 @@ func (rt *Runtime) Route(r *wkhttp.WKHttp) {
 		// handler; the 410 stub remains for deploy-compatibility (stale
 		// daemons get an actionable 410 with migration hint).
 		daemon.POST("/bot-tasks/:id/ack", rt.ackBotTaskDeprecated)
+		daemon.GET("/runtime-providers", rt.listProviders)
 	}
 
 	internal := r.Group("/v1/internal", rt.internalTokenAuth())
@@ -88,6 +87,13 @@ func (rt *Runtime) Route(r *wkhttp.WKHttp) {
 		// dropped — production rows may exist, DROP TABLE needs explicit
 		// data-archive evaluation (separate decision).
 		internal.POST("/bot-tasks", rt.createBotTaskDeprecated)
+	}
+
+	// runtime-latest-versions 写入口权限高(能改 daemon 升级产物来源),用专用
+	// admin token 鉴权,不与上面宽泛的 NOTIFY_INTERNAL_TOKEN 共用。
+	runtimeAdmin := r.Group("/v1/internal", rt.runtimeAdminTokenAuth())
+	{
+		runtimeAdmin.POST("/runtime-latest-versions", rt.upsertLatestVersionAdmin)
 	}
 
 	authGroup := r.Group("/v1", auth.Middleware("web"))
@@ -165,6 +171,13 @@ func (rt *Runtime) register(c *wkhttp.Context) {
 		if r.Type == "" {
 			continue
 		}
+		// 去 codex/hermes 的服务端权威过滤:老 daemon 仍探测/上报 disabled
+		// provider 时,fleet 直接丢弃不写 agent_runtime(不依赖 daemon 升级)。
+		if !rt.providers.IsActiveKind(r.Type) {
+			rt.Info("skip disabled/unknown provider on register",
+				zap.String("provider", r.Type), zap.String("daemon_id", req.DaemonID))
+			continue
+		}
 		status := r.Status
 		if status == "" {
 			status = "online"
@@ -217,10 +230,10 @@ func (rt *Runtime) register(c *wkhttp.Context) {
 			}
 		}
 
-		// Provider 组件升级关单（claude/codex/openclaw/hermes）：
+		// Provider 组件升级关单（claude/openclaw 等 active provider）：
 		// 按 (space, daemon_id, owner, provider, version, runtime_id) 匹配.
-		// 服务端 createComponentUpgradeTask 只允许 providerComponents 白名单创建任务，
-		// 这里无需再次白名单过滤：非白名单 provider 根本不会有对应 in-progress 任务可以关。
+		// 服务端 upgradeInit 只允许 active provider（registry IsActiveKind）创建任务，
+		// 这里无需再次过滤：非 active provider 根本不会有对应 in-progress 任务可以关。
 		if r.Version != "" {
 			rt.db.completeUpgradeIfMatchedWithRuntime(req.DaemonID, spaceID, ownerUID, r.Type, r.Version, id)
 		}
@@ -244,7 +257,77 @@ func (rt *Runtime) register(c *wkhttp.Context) {
 	})
 }
 
-// POST /v1/daemon/heartbeat
+type providerInfo struct {
+	Name              string `json:"name"`
+	DisplayName       string `json:"display_name"`
+	BinaryName        string `json:"binary_name"`
+	UpgradeTimeoutSec int    `json:"upgrade_timeout_sec"`
+}
+
+// GET /v1/daemon/runtime-providers — daemon 拉取 active provider 列表(PR-C 消费)。
+func (rt *Runtime) listProviders(c *wkhttp.Context) {
+	snap := rt.providers.current()
+	var out []providerInfo
+	for _, name := range snap.ActiveNames() {
+		d := snap.byName[name]
+		out = append(out, providerInfo{
+			Name: d.Name, DisplayName: d.DisplayName,
+			BinaryName: d.BinaryName, UpgradeTimeoutSec: d.UpgradeTimeoutSec,
+		})
+	}
+	c.Response(gin.H{"providers": out})
+}
+
+type upsertLatestVersionReq struct {
+	Component     string          `json:"component"`
+	LatestVersion string          `json:"latest_version"`
+	ReleaseMeta   json.RawMessage `json:"release_meta"` // 可选 JSON 对象(daemon 自升级需要 assets+checksum)
+}
+
+// POST /v1/internal/runtime-latest-versions — 人工维护 runtime_latest_version
+// (替代已停的 COS 同步器)。专用 admin token 鉴权(OCTO_RUNTIME_ADMIN_TOKEN
+// + X-Runtime-Admin-Token),非通用 internal token。
+func (rt *Runtime) upsertLatestVersionAdmin(c *wkhttp.Context) {
+	var req upsertLatestVersionReq
+	if err := c.BindJSON(&req); err != nil {
+		c.ResponseError(errors.New("invalid request body"))
+		return
+	}
+	// component 白名单:daemon / 插件 / active provider
+	valid := req.Component == componentDaemon || req.Component == componentPlugin || rt.providers.IsActiveKind(req.Component)
+	if !valid {
+		c.ResponseError(fmt.Errorf("component %q not in registry/whitelist", req.Component))
+		return
+	}
+	if !semverLike(req.LatestVersion) {
+		c.ResponseError(fmt.Errorf("latest_version %q not semver-like", req.LatestVersion))
+		return
+	}
+	// release_meta 可选:nil(省略)和 JSON "null" 都视为无;非空必须是合法 JSON。
+	hasReleaseMeta := req.ReleaseMeta != nil && string(req.ReleaseMeta) != "null"
+	if hasReleaseMeta && !json.Valid(req.ReleaseMeta) {
+		c.ResponseError(errors.New("release_meta must be valid JSON"))
+		return
+	}
+	releaseMeta := ""
+	if hasReleaseMeta {
+		releaseMeta = string(req.ReleaseMeta)
+	}
+	if err := rt.db.upsertLatestVersion(req.Component, req.LatestVersion, releaseMeta); err != nil {
+		rt.Error("admin upsert latest version", zap.Error(err))
+		c.ResponseError(errors.New("upsert failed"))
+		return
+	}
+	rt.Info("admin upserted latest version",
+		zap.String("component", req.Component), zap.String("version", req.LatestVersion))
+	c.Response(gin.H{"ok": true})
+}
+
+// semverLikeRe 宽松校验:可选 v 前缀、2-3 段数字、可选预发布/构建后缀。包级编译一次。
+var semverLikeRe = regexp.MustCompile(`^v?\d+\.\d+(\.\d+)?([-+].+)?$`)
+
+func semverLike(v string) bool { return semverLikeRe.MatchString(v) }
+
 func (rt *Runtime) heartbeat(c *wkhttp.Context) {
 	var req heartbeatReq
 	if err := c.BindJSON(&req); err != nil {
@@ -375,7 +458,7 @@ func (rt *Runtime) list(c *wkhttp.Context) {
 		return
 	}
 
-	models, err := rt.db.listBySpaceIDAndOwner(spaceID, loginUID)
+	models, err := rt.db.listBySpaceIDAndOwner(spaceID, loginUID, rt.providers.ActiveNames())
 	if err != nil {
 		rt.Error("list runtimes", zap.Error(err))
 		c.ResponseError(errors.New("query failed"))
@@ -810,7 +893,11 @@ func (rt *Runtime) runSweeper() {
 			rt.Info("cleaned old ping entries", zap.Int64("count", cleaned))
 		}
 
-		rt.db.timeoutStaleUpgrades()
+		active := map[string]int{}
+		for _, n := range rt.providers.ActiveNames() {
+			active[n] = rt.providers.TimeoutSec(n)
+		}
+		rt.db.timeoutStaleUpgrades(active)
 	}
 }
 

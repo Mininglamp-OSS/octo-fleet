@@ -411,7 +411,7 @@ func (rt *Runtime) dispatchManagedBotsChanged(runtimeID int64, spaceID, ownerUID
 }
 
 // runEventLogSweeper 周期 prune event_log 老 row. 跑独立 goroutine (类似
-// runSweeper / versionSyncer), 失败不影响主链路.
+// runSweeper), 失败不影响主链路.
 //
 // cadence 1h, TTL 24h — 不需要精确实时, 留 retention window 给 daemon
 // 重连补 missed events.
