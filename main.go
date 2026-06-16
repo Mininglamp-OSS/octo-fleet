@@ -44,6 +44,27 @@ func loadConfigFromFile(cfgFile string) *viper.Viper {
 	return vp
 }
 
+// @title           Octo Fleet API
+// @version         1.0.0
+// @description     Runtime & bot orchestration for OCTO — daemon registry, heartbeat dispatch, bot provisioning. Gateway mounts this at <host>/fleet/api/; the spec describes only /v1/<resource> (A.1).
+// @BasePath        /v1
+// @contact.name    OCTO Team (Mininglamp-OSS)
+// @contact.url     https://github.com/Mininglamp-OSS/octo-fleet
+//
+// @tag.name        runtime
+// @tag.description Agent runtime registry — register, heartbeat, deregister, list, delete.
+// @tag.name        bot
+// @tag.description Bot orchestration — create, mint, provision, ack, archive.
+// @tag.name        upgrade
+// @tag.description Component / daemon upgrade tasks.
+// @tag.name        provider
+// @tag.description Runtime-provider catalog.
+// @tag.name        event
+// @tag.description Daemon SSE reverse-dispatch stream.
+//
+// @securityDefinitions.apikey Bearer
+// @in              header
+// @name            Authorization
 func main() {
 	var cfgFile string
 	flag.StringVar(&cfgFile, "config", "configs/fleet.yaml", "config file")
