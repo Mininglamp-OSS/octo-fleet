@@ -131,7 +131,9 @@ and the spec at
 - `POST /v1/daemon/register`
 - `POST /v1/daemon/heartbeat` — returns `pending_command` (bot.provision) + `managed_bots`
 - `POST /v1/daemon/deregister`
-- `POST /v1/daemon/{ping,upgrade,bots,bot-tasks}/...` ack endpoints
+- `POST /v1/daemon/{upgrade,bots,bot-tasks}/...` ack endpoints
+  (`/v1/daemon/ping/:id` remains as a deprecated no-op compatibility shim — the
+  Server Ping feature was removed; it is not part of the supported API surface)
 
 ### Web endpoints (JWT scope=web)
 - `GET  /v1/runtimes` — list registered runtimes in space

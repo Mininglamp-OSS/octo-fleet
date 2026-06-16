@@ -123,7 +123,8 @@ Fleet 配置从 `configs/fleet.yaml` 读，加上以下环境变量覆盖：
 - `POST /v1/daemon/register`
 - `POST /v1/daemon/heartbeat` — 返回 `pending_command`（bot.provision）+ `managed_bots`
 - `POST /v1/daemon/deregister`
-- `POST /v1/daemon/{ping,upgrade,bots,bot-tasks}/...` 各类 ack
+- `POST /v1/daemon/{upgrade,bots,bot-tasks}/...` 各类 ack
+  (`/v1/daemon/ping/:id` 仅保留为已废弃的 no-op 兼容 shim —— Server Ping 功能已移除,不属于受支持 API)
 
 ### Web 端点（JWT scope=web）
 - `GET  /v1/runtimes` — 列空间内注册的 runtime
