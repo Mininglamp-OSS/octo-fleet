@@ -62,10 +62,19 @@ func toFetchResponse(m *botModel) botProvisionFetchResponse {
 	}
 }
 
-// GET /v1/daemon/bot-provisions/:command_id
+// GET /v1/daemon/bot-provisions/:command_id?runtime_id=N
 //
 // :command_id 即 bot.id (跟老 heartbeat buildPendingBotProvision 的
 // `id` 字段一致, daemon 端 handleBotProvision 已知道这个 shape).
+//
+// runtime 绑定 (Jerry-Xin fleet#44 blocking): api_key 只绑 (owner, space),
+// fleet 单凭 key 区分不出 caller 是哪台 daemon/runtime. 仅校验 owner+space
+// 不够 —— 同 owner+space 下 daemon A 可以拿别的 runtime 的 bot.id 来 fetch,
+// 把本该派给 daemon B 的 bot claim + ack 走, 绕过 heartbeat 路径
+// (claimPendingBotProvision) 用 daemon_id 保证的路由. 所以这里要求 daemon
+// 自报 runtime_id (订阅 SSE 时本就带了), 验它归 caller 所有 (同 sseEvents
+// 的 A7 gate), 且 bot.runtime_id 必须等于它. claim UPDATE 也带 runtime_id
+// 约束, 跟 claimPendingBotProvision 对齐.
 func (rt *Runtime) fetchBotProvision(c *wkhttp.Context) {
 	ownerUID := c.MustGet("uid").(string)
 	spaceID := c.MustGet("space_id").(string)
@@ -77,19 +86,41 @@ func (rt *Runtime) fetchBotProvision(c *wkhttp.Context) {
 		return
 	}
 
+	runtimeIDStr := c.Query("runtime_id")
+	runtimeID, err := strconv.ParseInt(runtimeIDStr, 10, 64)
+	if err != nil || runtimeID <= 0 {
+		c.ResponseError(errors.New("invalid runtime_id"))
+		return
+	}
+
+	// A7 ownership gate (同 sseEvents): runtime_id 必须属于 caller 的
+	// (owner_uid, space_id), 否则 daemon A 持自己 api_key 传别人的
+	// runtime_id 就绕过了路由绑定.
+	own, err := rt.db.queryByID(runtimeID)
+	if err != nil {
+		rt.Error("fetchBotProvision: query runtime by id", zap.Error(err), zap.Int64("runtime_id", runtimeID))
+		c.ResponseErrorWithStatus(errors.New("internal error"), http.StatusInternalServerError)
+		return
+	}
+	if own == nil || own.OwnerUID != ownerUID || own.SpaceID != spaceID {
+		c.ResponseErrorWithStatus(errors.New("not found or no permission"), http.StatusForbidden)
+		return
+	}
+
 	row, err := rt.db.queryBotByID(id)
 	if err != nil {
 		rt.Error("fetchBotProvision: queryBotByID", zap.Error(err), zap.Int64("id", id))
 		c.ResponseErrorWithStatus(errors.New("internal error"), http.StatusInternalServerError)
 		return
 	}
-	// ownership gate: 不分 not-found vs forbidden, 防 enumeration.
-	if row == nil || row.OwnerUID != ownerUID || row.SpaceID != spaceID {
+	// ownership + routing gate: 不分 not-found vs forbidden, 防 enumeration.
+	// row.RuntimeID != runtimeID 即"这个 bot 不归来取的这台 daemon" — 拒绝.
+	if row == nil || row.OwnerUID != ownerUID || row.SpaceID != spaceID || row.RuntimeID != runtimeID {
 		c.ResponseErrorWithStatus(errors.New("not found or no permission"), http.StatusForbidden)
 		return
 	}
 
-	rt.respondBotProvisionByStatus(c, id, row)
+	rt.respondBotProvisionByStatus(c, id, runtimeID, row)
 }
 
 // respondBotProvisionByStatus 按 row 当前 status 返响应. 在两个地方调:
@@ -105,17 +136,19 @@ func (rt *Runtime) fetchBotProvision(c *wkhttp.Context) {
 //     仍按 default 返 410 防死循环)
 //
 // F-4 (lml2468 review): 改用 toFetchResponse 不复用 buildPendingBotProvision.
-func (rt *Runtime) respondBotProvisionByStatus(c *wkhttp.Context, id int64, row *botModel) {
+func (rt *Runtime) respondBotProvisionByStatus(c *wkhttp.Context, id, runtimeID int64, row *botModel) {
 	switch row.Status {
 	case botStatusBotMinted:
 		// 原子 claim + mint claim_token (同 claimPendingBotProvision 但
 		// by id 而非 daemon_id pick-one). 双跑期: heartbeat
 		// claimPendingBotProvision 仍可能并发尝试同一 row, UPDATE WHERE
 		// status='bot_minted' 是 atomic, 同 row 只有一方成功.
+		// runtime_id 约束 (fleet#44): claim 只在 bot 归这台 runtime 时成立,
+		// 跟 claimPendingBotProvision 的 daemon_id 路由绑定对齐.
 		token := randomToken()
 		result, uerr := rt.db.session.UpdateBySql(
-			`UPDATE bot SET status=?, claim_token=? WHERE id=? AND status=?`,
-			botStatusDispatched, token, id, botStatusBotMinted,
+			`UPDATE bot SET status=?, claim_token=? WHERE id=? AND status=? AND runtime_id=?`,
+			botStatusDispatched, token, id, botStatusBotMinted, runtimeID,
 		).Exec()
 		if uerr != nil {
 			rt.Error("fetchBotProvision: claim update", zap.Error(uerr), zap.Int64("id", id))
@@ -141,7 +174,7 @@ func (rt *Runtime) respondBotProvisionByStatus(c *wkhttp.Context, id int64, row 
 				)
 				return
 			}
-			rt.respondBotProvisionByStatus(c, id, newRow)
+			rt.respondBotProvisionByStatus(c, id, runtimeID, newRow)
 			return
 		}
 		row.Status = botStatusDispatched

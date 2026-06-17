@@ -91,6 +91,39 @@ func TestSSERegression_FetchBotProvisionOwnershipGate(t *testing.T) {
 	}
 }
 
+// runtime 绑定 (Jerry-Xin fleet#44 blocking): api_key 只绑 (owner, space),
+// fleet 区分不出 caller 是哪台 daemon. 只验 owner+space 的话, 同 owner+space
+// 下 daemon A 能拿别的 runtime 的 bot.id 来 fetch + claim + ack, 绕过 heartbeat
+// 路径 (claimPendingBotProvision) 用 daemon_id 保证的路由. fetch 必须:
+//  1. 要求 daemon 自报 runtime_id 并验它归 caller 所有 (同 sseEvents A7 gate)
+//  2. 校验 bot.RuntimeID == runtime_id (这个 bot 确实归来取的这台 daemon)
+func TestSSERegression_FetchBotProvisionRuntimeBinding(t *testing.T) {
+	body := extractFuncBody(t, mustReadSource(t, "bot_provision_fetch.go"), "fetchBotProvision")
+	// 解析并校验 caller 自报的 runtime_id.
+	if !strings.Contains(body, `c.Query("runtime_id")`) {
+		t.Error("fetchBotProvision 必须从请求读 runtime_id — api_key 只绑 owner+space, 路由绑定要靠 daemon 自报 runtime_id (fleet#44)")
+	}
+	// runtime 归属 gate (同 sseEvents): queryByID + owner/space 验拥有关系.
+	if !strings.Contains(body, "queryByID(runtimeID)") {
+		t.Error("fetchBotProvision 必须 queryByID(runtimeID) 验 runtime 归 caller 所有 (A7 ownership gate, fleet#44)")
+	}
+	// bot 必须归这台 runtime, 否则就是跨 daemon 劫持.
+	if !strings.Contains(body, "row.RuntimeID != runtimeID") {
+		t.Error("fetchBotProvision 必须校验 row.RuntimeID == runtimeID — 防同 owner+space 下跨 daemon 拿别人 bot provision (fleet#44)")
+	}
+}
+
+// claim UPDATE 必须带 runtime_id 约束, 跟 claimPendingBotProvision 的 daemon_id
+// 路由绑定对齐 — 仅靠 handler 顶层校验不够, claim 这步是真正 mint claim_token
+// 的地方, query→update 之间有窗口, 正确性不能只依赖前置 4xx 校验.
+func TestSSERegression_FetchBotProvisionClaimBindsRuntime(t *testing.T) {
+	body := extractFuncBody(t, mustReadSource(t, "bot_provision_fetch.go"), "respondBotProvisionByStatus")
+	if !strings.Contains(body, "WHERE id=? AND status=? AND runtime_id=?") {
+		t.Errorf("respondBotProvisionByStatus 的 claim UPDATE 必须 gate 在完整谓词 "+
+			"`WHERE id=? AND status=? AND runtime_id=?` 上, 让跨 runtime 的 claim 匹配 0 行 (fleet#44).\n\nbody:\n%s", body)
+	}
+}
+
 // Phase A 双跑保证: heartbeat handler 不能拆掉 claimPendingXxx 调用,
 // 否则 SSE 没工作时反向派发完全断 (新 daemon 还没建 SSE 之前的 1-2s
 // window / SSE 重连之间的 gap / SSE channel full drop 等场景都失守).
