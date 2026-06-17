@@ -268,9 +268,9 @@ func (rt *Runtime) listProviders(c *wkhttp.Context) {
 }
 
 type upsertLatestVersionReq struct {
-	Component     string          `json:"component"`
-	LatestVersion string          `json:"latest_version"`
-	ReleaseMeta   json.RawMessage `json:"release_meta"` // 可选 JSON 对象(daemon 自升级需要 assets+checksum)
+	Component     string           `json:"component"`
+	LatestVersion string           `json:"latest_version"`
+	ReleaseMeta   *releaseMetaJSON `json:"release_meta"` // 可选:daemon 自升级所需的 assets+checksums(省略=不更新)
 }
 
 // upsertLatestVersionAdmin godoc
@@ -303,15 +303,17 @@ func (rt *Runtime) upsertLatestVersionAdmin(c *wkhttp.Context) {
 		responseError(c, errcode.Validation)
 		return
 	}
-	// release_meta 可选:nil(省略)和 JSON "null" 都视为无;非空必须是合法 JSON。
-	hasReleaseMeta := req.ReleaseMeta != nil && string(req.ReleaseMeta) != "null"
-	if hasReleaseMeta && !json.Valid(req.ReleaseMeta) {
-		responseError(c, errcode.Validation)
-		return
-	}
+	// release_meta 可选:省略(nil)或 JSON null 表示不更新,保留 DB 已有值。
+	// 非空时 BindJSON 已确保它符合 releaseMetaJSON 形状——非对象 JSON
+	// (如整数数组)在 bind 阶段即被拒,无需再手写形状校验。
 	releaseMeta := ""
-	if hasReleaseMeta {
-		releaseMeta = string(req.ReleaseMeta)
+	if req.ReleaseMeta != nil {
+		b, err := json.Marshal(req.ReleaseMeta)
+		if err != nil {
+			responseError(c, errcode.Validation)
+			return
+		}
+		releaseMeta = string(b)
 	}
 	if err := rt.db.upsertLatestVersion(req.Component, req.LatestVersion, releaseMeta); err != nil {
 		rt.Error("admin upsert latest version", zap.Error(err))

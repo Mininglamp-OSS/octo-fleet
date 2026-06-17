@@ -318,6 +318,36 @@ components:
         provider:
           type: string
       type: object
+    runtime.releaseAssetJSON:
+      properties:
+        arch:
+          type: string
+        kind:
+          type: string
+        name:
+          type: string
+        os:
+          type: string
+        size:
+          type: integer
+        url:
+          type: string
+      type: object
+    runtime.releaseMetaJSON:
+      description: 可选:daemon 自升级所需的 assets+checksums(省略=不更新)
+      properties:
+        assets:
+          items:
+            $ref: '#/components/schemas/runtime.releaseAssetJSON'
+          type: array
+          uniqueItems: false
+        checksums:
+          additionalProperties:
+            type: string
+          type: object
+        tag:
+          type: string
+      type: object
     runtime.runtimeReq:
       properties:
         agents:
@@ -440,11 +470,7 @@ components:
         latest_version:
           type: string
         release_meta:
-          description: 可选 JSON 对象(daemon 自升级需要 assets+checksum)
-          items:
-            type: integer
-          type: array
-          uniqueItems: false
+          $ref: '#/components/schemas/runtime.releaseMetaJSON'
       type: object
     runtime.versionHint:
       properties:
