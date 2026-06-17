@@ -127,6 +127,28 @@ func (d *runtimeDB) updateBotStatus(id int64, status, errMsg string) error {
 	return err
 }
 
+// ackBotStatus atomically flips a *dispatched* bot to the acked status
+// and clears its claim_token, gated on a matching claim_token. The
+// `status=dispatched AND claim_token=?` guard makes a delayed or
+// duplicated daemon ack against an archived/terminal bot a no-op (zero
+// rows), and clearing the token stops a second ack with the same token
+// from ever matching again. Returns rows affected so the caller can tell
+// a real flip from a replayed/stale ack.
+//
+// This is the actual anti-replay enforcement: the handler's query-time
+// space/owner/token checks are friendly 4xx guards, but the
+// queryBotByID→update window is racy, so correctness can't rely on them.
+func (d *runtimeDB) ackBotStatus(id int64, status, errMsg, claimToken string) (int64, error) {
+	res, err := d.session.UpdateBySql(
+		`UPDATE bot SET status=?, error_msg=?, claim_token='' WHERE id=? AND status=? AND claim_token=?`,
+		status, errMsg, id, botStatusDispatched, claimToken,
+	).Exec()
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 func (d *runtimeDB) queryBotByID(id int64) (*botModel, error) {
 	var m botModel
 	count, err := d.session.SelectBySql(
@@ -556,13 +578,42 @@ func (rt *Runtime) ackBot(c *wkhttp.Context) {
 		c.ResponseErrorWithStatus(errors.New("no permission"), http.StatusForbidden)
 		return
 	}
+	// 幂等短路:bot 已是目标态 → 这个 ack 之前已成功应用过。成功 ack 会清空
+	// claim_token,所以重放请求带的 token 此时和 db 对不上,必须在 claim_token
+	// 校验**之前**幂等返回,否则下面的 `m.ClaimToken == ""` 会把它拦成 409,
+	// 而 daemon 对非 2xx 会无限重试(replay/heartbeat 兜底)。这里是 no-op
+	// (不翻状态、不发 SSE),且 space/owner 已校验,安全。archived bot 的 status
+	// 是 "archived",永不等于 active/failed,不会命中短路,复活仍被堵死。
+	if m.Status == req.Status {
+		c.ResponseOK()
+		return
+	}
 	if m.ClaimToken == "" || m.ClaimToken != req.ClaimToken {
 		c.ResponseErrorWithStatus(errors.New("invalid or stale claim_token"), http.StatusConflict)
 		return
 	}
-	if err := rt.db.updateBotStatus(id, req.Status, req.ErrorMsg); err != nil {
+	// Atomic, replay-safe flip: only a still-dispatched bot with a
+	// matching claim_token is updated, and the token is cleared so the
+	// same ack can't be replayed. Zero rows means the bot is no longer
+	// dispatched (already acked, archived/deleted, or token rotated) —
+	// a stale/replayed ack that must NOT flip status or emit SSE.
+	affected, err := rt.db.ackBotStatus(id, req.Status, req.ErrorMsg, req.ClaimToken)
+	if err != nil {
 		rt.Error("ackBot update", zap.Error(err))
 		c.ResponseError(errors.New("ack failed"))
+		return
+	}
+	if affected == 0 {
+		// daemon 的容错会主动 replay ack (ack 失败不 markDone → SSE replay /
+		// heartbeat 重试),所以重复 ack 是正常流量。区分两种零行:
+		//   (a) 该 ack 之前已成功应用 (bot 已是目标态) → 幂等返回 OK,
+		//       否则 daemon 收非 2xx 永远 markDone 不了 → 无限重试;
+		//   (b) bot 已 archived / 处于其他终态 / token 已轮换 → 真冲突 409。
+		if cur, qerr := rt.db.queryBotByID(id); qerr == nil && cur != nil && cur.Status == req.Status {
+			c.ResponseOK()
+			return
+		}
+		c.ResponseErrorWithStatus(errors.New("bot not in dispatched state or stale claim_token"), http.StatusConflict)
 		return
 	}
 	// F-2 (lml2468 review): ack 'failed' 时补 managed_bots_changed{removed}
