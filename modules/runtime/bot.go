@@ -1,14 +1,11 @@
 package runtime
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
-	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -57,24 +54,6 @@ const (
 	botStatusFailed       = "failed"
 	botStatusArchived     = "archived"
 )
-
-// Runtime kinds we accept for bot creation. Only "openclaw" actually runs
-// tasks in PoC4 — the others are inert (registered but dispatch fails with
-// "runtime not supported yet"). See spec §"non-openclaw bot create flow".
-const (
-	runtimeKindOpenclaw = "openclaw"
-	runtimeKindClaude   = "claude"
-	runtimeKindCodex    = "codex"
-	runtimeKindHermes   = "hermes"
-)
-
-func isValidRuntimeKind(k string) bool {
-	switch k {
-	case runtimeKindOpenclaw, runtimeKindClaude, runtimeKindCodex, runtimeKindHermes:
-		return true
-	}
-	return false
-}
 
 // ---------- request / response ----------
 
@@ -148,6 +127,28 @@ func (d *runtimeDB) updateBotStatus(id int64, status, errMsg string) error {
 	return err
 }
 
+// ackBotStatus atomically flips a *dispatched* bot to the acked status
+// and clears its claim_token, gated on a matching claim_token. The
+// `status=dispatched AND claim_token=?` guard makes a delayed or
+// duplicated daemon ack against an archived/terminal bot a no-op (zero
+// rows), and clearing the token stops a second ack with the same token
+// from ever matching again. Returns rows affected so the caller can tell
+// a real flip from a replayed/stale ack.
+//
+// This is the actual anti-replay enforcement: the handler's query-time
+// space/owner/token checks are friendly 4xx guards, but the
+// queryBotByID→update window is racy, so correctness can't rely on them.
+func (d *runtimeDB) ackBotStatus(id int64, status, errMsg, claimToken string) (int64, error) {
+	res, err := d.session.UpdateBySql(
+		`UPDATE bot SET status=?, error_msg=?, claim_token='' WHERE id=? AND status=? AND claim_token=?`,
+		status, errMsg, id, botStatusDispatched, claimToken,
+	).Exec()
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 func (d *runtimeDB) queryBotByID(id int64) (*botModel, error) {
 	var m botModel
 	count, err := d.session.SelectBySql(
@@ -162,27 +163,43 @@ func (d *runtimeDB) queryBotByID(id int64) (*botModel, error) {
 	return &m, nil
 }
 
-func (d *runtimeDB) listBotsBySpace(spaceID, ownerUID, runtimeKind string) ([]*botModel, error) {
-	q := d.session.SelectBySql(
-		"SELECT "+botSelectColumns+` FROM bot
-		 WHERE space_id=? AND status != ?
-		   AND (?='' OR owner_uid=?)
-		   AND (?='' OR runtime_kind=?)
-		 ORDER BY id DESC LIMIT 200`,
-		spaceID, botStatusArchived,
-		ownerUID, ownerUID,
-		runtimeKind, runtimeKind,
-	)
+// listBotsBySpace lists active bots in the given (space, owner) scope.
+// v3 §4.5 (defense-in-depth C): ownerUID is now mandatory — the prior
+// "ownerUID=” disables filter" branch was the enumeration vector via
+// listBots's `?owner_uid=` query param. Caller must always pass the
+// authenticated loginUID; pass-through of unauthenticated input is no
+// longer supported here.
+func (d *runtimeDB) listBotsBySpace(spaceID, ownerUID, runtimeKind string, activeKinds []string) ([]*botModel, error) {
+	if ownerUID == "" {
+		return nil, errors.New("listBotsBySpace: ownerUID required (v3 §4.5)")
+	}
+	// active 为空 = 没有任何 active provider,返回空(而非退化成列出全部 bot)。
+	if len(activeKinds) == 0 {
+		return []*botModel{}, nil
+	}
+	sql := "SELECT " + botSelectColumns + ` FROM bot
+		 WHERE space_id=? AND status != ? AND owner_uid=?
+		   AND (?='' OR runtime_kind=?)`
+	args := []interface{}{spaceID, botStatusArchived, ownerUID, runtimeKind, runtimeKind}
+	if len(activeKinds) > 0 {
+		ph := strings.Repeat("?,", len(activeKinds))
+		ph = ph[:len(ph)-1]
+		sql += " AND runtime_kind IN (" + ph + ")"
+		for _, k := range activeKinds {
+			args = append(args, k)
+		}
+	}
+	sql += " ORDER BY id DESC LIMIT 200"
 	var out []*botModel
-	if _, err := q.Load(&out); err != nil {
+	if _, err := d.session.SelectBySql(sql, args...).Load(&out); err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-// claimPendingBotProvision picks one bot_minted openclaw row for this
-// daemon, marks dispatched + sets claim_token, returns it.
-func (d *runtimeDB) claimPendingBotProvision(daemonID string) (*botModel, error) {
+// claimPendingBotProvision picks one bot_minted row of the given runtime kind
+// for this daemon, marks dispatched + sets claim_token, returns it.
+func (d *runtimeDB) claimPendingBotProvision(daemonID, spaceID, ownerUID, runtimeKind string) (*botModel, error) {
 	tx, err := d.session.Begin()
 	if err != nil {
 		return nil, err
@@ -190,11 +207,20 @@ func (d *runtimeDB) claimPendingBotProvision(daemonID string) (*botModel, error)
 	defer tx.RollbackUnlessCommitted()
 
 	var m botModel
+	// (owner_uid, space_id) filter (reviewer fleet#24 Jerry-Xin three-
+	// round): bot table has owner_uid + space_id; without both filters
+	// user B could claim a bot provision row that was inserted for user
+	// A's daemon (same daemon_id, same space), OR a daemon in Space B
+	// could claim a bot provision row from Space A for the same owner —
+	// both legal collision shapes after runtime-20260606-01 4-tuple
+	// unique key. v3 §4.3 added owner_uid; v3.3.2 #1 closes the missing
+	// space_id dimension (api_keys are space-bound, so a same-owner
+	// cross-space daemon is a valid collision target).
 	count, err := tx.SelectBySql(
 		"SELECT "+botSelectColumns+` FROM bot
-		 WHERE daemon_id=? AND runtime_kind=? AND status=?
+		 WHERE daemon_id=? AND owner_uid=? AND space_id=? AND runtime_kind=? AND status=?
 		 ORDER BY id ASC LIMIT 1 FOR UPDATE`,
-		daemonID, runtimeKindOpenclaw, botStatusBotMinted,
+		daemonID, ownerUID, spaceID, runtimeKind, botStatusBotMinted,
 	).Load(&m)
 	if err != nil || count == 0 {
 		return nil, err
@@ -275,8 +301,9 @@ func (rt *Runtime) createBot(c *wkhttp.Context) {
 		c.ResponseError(errors.New("name required"))
 		return
 	}
-	if !isValidRuntimeKind(req.RuntimeKind) {
-		c.ResponseError(fmt.Errorf("runtime_kind must be openclaw|claude|codex|hermes, got %q", req.RuntimeKind))
+	if !rt.providers.IsActiveKind(req.RuntimeKind) {
+		c.ResponseError(fmt.Errorf("runtime_kind must be one of [%s], got %q",
+			strings.Join(rt.providers.ActiveNames(), ", "), req.RuntimeKind))
 		return
 	}
 
@@ -304,9 +331,11 @@ func (rt *Runtime) createBot(c *wkhttp.Context) {
 		Name:        name,
 		Status:      botStatusDraft,
 	}
-	if req.RuntimeKind == runtimeKindOpenclaw {
-		row.WorkspaceID = deriveWorkspaceID(name)
-	}
+	// Every runtime kind gets a workspace_id: the daemon's provision handler
+	// requires it non-empty. openclaw uses it as the agent/workspace name;
+	// other kinds (claude/codex/hermes) carry it as a stable per-bot id even
+	// when their adapter doesn't key local resources on it.
+	row.WorkspaceID = deriveWorkspaceID(name)
 
 	id, err := rt.db.insertBot(row)
 	if err != nil {
@@ -338,11 +367,11 @@ type patchBotMintReq struct {
 // PATCH /v1/runtimes/bots/:id/mint
 //
 // Web caller flow:
-//   1. POST /v1/runtimes/bots       → fleet inserts draft row, returns id
-//   2. POST /v1/bot/mint (server)   → server mints IM bot, returns bot_uid
-//   3. PATCH /v1/runtimes/bots/:id/mint {bot_uid} → fleet promotes row
-//      to bot_minted (openclaw) or active (inert), queues bot.provision
-//      for the daemon to claim on its next heartbeat.
+//  1. POST /v1/runtimes/bots       → fleet inserts draft row, returns id
+//  2. POST /v1/bot/mint (server)   → server mints IM bot, returns bot_uid
+//  3. PATCH /v1/runtimes/bots/:id/mint {bot_uid} → fleet promotes row
+//     to bot_minted (openclaw) or active (inert), queues bot.provision
+//     for the daemon to claim on its next heartbeat.
 //
 // bot_token is NEVER written to fleet — it remains on octo-server and the
 // daemon fetches it via GET /v1/bot/:uid/token using its daemon-scope JWT.
@@ -379,12 +408,11 @@ func (rt *Runtime) patchBotMint(c *wkhttp.Context) {
 		return
 	}
 
-	// openclaw bots need daemon provisioning; others go straight to
-	// active (inert — non-openclaw paths are not yet implemented).
-	nextStatus := botStatusActive
-	if row.RuntimeKind == runtimeKindOpenclaw {
-		nextStatus = botStatusBotMinted
-	}
+	// All runtime kinds need daemon provisioning now. The daemon resolves the
+	// runtime_kind to the matching adapter; kinds whose adapter is not yet
+	// implemented ack the provision as failed (visible) rather than silently
+	// staying inert.
+	nextStatus := botStatusBotMinted
 	if _, err := rt.db.session.UpdateBySql(
 		`UPDATE bot SET bot_uid=?, status=? WHERE id=?`,
 		req.BotUID, nextStatus, id,
@@ -396,6 +424,17 @@ func (rt *Runtime) patchBotMint(c *wkhttp.Context) {
 	row.BotUID = req.BotUID
 	row.Status = nextStatus
 	row.UpdatedAt = db.Time(time.Now())
+
+	// 决策三 SSE 反向派发 (Phase A 双跑): bot 进 bot_minted 状态后, 推
+	// bot_provision wake-up event 给目标 runtime, daemon 收到后走
+	// GET /v1/daemon/bot-provisions/:id 单独 fetch full payload (含 bot_token).
+	// A3 决策: token 不进 SSE stream / 不进 event_log. heartbeat
+	// claimPendingBotProvision 仍兜底.
+	if nextStatus == botStatusBotMinted && row.RuntimeID > 0 {
+		rt.dispatchBotProvision(row.RuntimeID, row.SpaceID, row.OwnerUID, fmt.Sprintf("%d", row.Id))
+		rt.dispatchManagedBotsChanged(row.RuntimeID, row.SpaceID, row.OwnerUID, []string{req.BotUID}, nil)
+	}
+
 	c.Response(toBotResp(row))
 }
 
@@ -408,18 +447,28 @@ func (rt *Runtime) listBots(c *wkhttp.Context) {
 		return
 	}
 	loginUID := c.GetLoginUID()
-	// FLEET MIGRATION: trust JWT.space_id (was space_member lookup)
+	// v2 鉴权关系数据补全 + v3 §4.5 (defense-in-depth C): MatchesSpace
+	// compares ?space_id against the ctx space_id that the wrapper
+	// injected from X-Space-Id. The wrapper validated X-Space-Id against
+	// server-validated spaces (auth/middleware.go Middleware()) when
+	// context_included=true; on pre-v2 fallback, the wrapper trusts the
+	// header and this handler MUST NOT rely on MatchesSpace alone — hence
+	// the unconditional owner_uid=loginUID filter below.
 	if !auth.MatchesSpace(c, spaceID) {
 		c.ResponseErrorWithStatus(errors.New("not a space member"), http.StatusForbidden)
 		return
 	}
-	owner := c.Query("owner_uid")
-	if owner == "me" {
-		owner = loginUID
-	}
+	// v3 §4.5 (defense-in-depth C, yujiawei P1): owner_uid is now
+	// MANDATORY and bound to loginUID — the prior `?owner_uid=` query
+	// param + `?='' OR owner_uid=?` SQL was the attack surface that let
+	// a zero-space caller (pre-v2 fallback / future bug) enumerate
+	// another owner's bots by omitting the parameter. Sharing a space
+	// with other users no longer implies seeing their bot inventory;
+	// the team-shared-view UX moves to a future dedicated endpoint if
+	// product wants it back.
 	kind := c.Query("runtime_kind")
 
-	rows, err := rt.db.listBotsBySpace(spaceID, owner, kind)
+	rows, err := rt.db.listBotsBySpace(spaceID, loginUID, kind, rt.providers.ActiveNames())
 	if err != nil {
 		rt.Error("listBots", zap.Error(err))
 		c.ResponseError(errors.New("list failed"))
@@ -483,6 +532,13 @@ func (rt *Runtime) archiveBot(c *wkhttp.Context) {
 		c.ResponseError(errors.New("archive failed"))
 		return
 	}
+	// 决策三 SSE: bot 归档 → managed_bots_changed delta 推到目标 runtime
+	// 让 daemon 立即从本地 active 集合移除. heartbeat managed_bots
+	// snapshot 仍是 baseline (Phase B 改 30s 后这条 delta 是主要实时性
+	// 来源 — v6 plan §3.5 A2 trade-off).
+	if m.RuntimeID > 0 && m.BotUID != "" {
+		rt.dispatchManagedBotsChanged(m.RuntimeID, m.SpaceID, m.OwnerUID, nil, []string{m.BotUID})
+	}
 	c.ResponseOK()
 }
 
@@ -514,33 +570,80 @@ func (rt *Runtime) ackBot(c *wkhttp.Context) {
 		c.ResponseErrorWithStatus(errors.New("no permission"), http.StatusForbidden)
 		return
 	}
+	// 合并 plan 决策一+二 Phase 3B 补漏: ackBot 加 owner_uid 校验 (defense
+	// in depth). claim_token 防伪已经够, 但额外校验 caller (daemon) 的 uid
+	// 必须等于 bot owner_uid, 防止 daemon 配错 api_key 后误改别人 bot 状态.
+	ownerUID := c.MustGet("uid").(string)
+	if m.OwnerUID != ownerUID {
+		c.ResponseErrorWithStatus(errors.New("no permission"), http.StatusForbidden)
+		return
+	}
+	// 幂等短路:bot 已是目标态 → 这个 ack 之前已成功应用过。成功 ack 会清空
+	// claim_token,所以重放请求带的 token 此时和 db 对不上,必须在 claim_token
+	// 校验**之前**幂等返回,否则下面的 `m.ClaimToken == ""` 会把它拦成 409,
+	// 而 daemon 对非 2xx 会无限重试(replay/heartbeat 兜底)。这里是 no-op
+	// (不翻状态、不发 SSE),且 space/owner 已校验,安全。archived bot 的 status
+	// 是 "archived",永不等于 active/failed,不会命中短路,复活仍被堵死。
+	if m.Status == req.Status {
+		c.ResponseOK()
+		return
+	}
 	if m.ClaimToken == "" || m.ClaimToken != req.ClaimToken {
 		c.ResponseErrorWithStatus(errors.New("invalid or stale claim_token"), http.StatusConflict)
 		return
 	}
-	if err := rt.db.updateBotStatus(id, req.Status, req.ErrorMsg); err != nil {
+	// Atomic, replay-safe flip: only a still-dispatched bot with a
+	// matching claim_token is updated, and the token is cleared so the
+	// same ack can't be replayed. Zero rows means the bot is no longer
+	// dispatched (already acked, archived/deleted, or token rotated) —
+	// a stale/replayed ack that must NOT flip status or emit SSE.
+	affected, err := rt.db.ackBotStatus(id, req.Status, req.ErrorMsg, req.ClaimToken)
+	if err != nil {
 		rt.Error("ackBot update", zap.Error(err))
 		c.ResponseError(errors.New("ack failed"))
 		return
+	}
+	if affected == 0 {
+		// daemon 的容错会主动 replay ack (ack 失败不 markDone → SSE replay /
+		// heartbeat 重试),所以重复 ack 是正常流量。区分两种零行:
+		//   (a) 该 ack 之前已成功应用 (bot 已是目标态) → 幂等返回 OK,
+		//       否则 daemon 收非 2xx 永远 markDone 不了 → 无限重试;
+		//   (b) bot 已 archived / 处于其他终态 / token 已轮换 → 真冲突 409。
+		if cur, qerr := rt.db.queryBotByID(id); qerr == nil && cur != nil && cur.Status == req.Status {
+			c.ResponseOK()
+			return
+		}
+		c.ResponseErrorWithStatus(errors.New("bot not in dispatched state or stale claim_token"), http.StatusConflict)
+		return
+	}
+	// F-2 (lml2468 review): ack 'failed' 时补 managed_bots_changed{removed}
+	// compensating event. patchBotMint 已发 added (bot_minted → SSE delta),
+	// 这里 ack failed 必须发 removed 让 daemon 缓存清掉 phantom bot, 否则
+	// daemon 一直 poll matter 拿这个不存在的 bot 的 task. heartbeat snapshot
+	// 5-7s 后也会 reconcile, 但 SSE delta 是优先实时性. 'active' 不发
+	// removed (bot 正常 provision 成功, daemon 缓存里就该有).
+	if req.Status == botStatusFailed && m.RuntimeID > 0 && m.BotUID != "" {
+		rt.dispatchManagedBotsChanged(m.RuntimeID, m.SpaceID, m.OwnerUID, nil, []string{m.BotUID})
 	}
 	c.ResponseOK()
 }
 
 // buildPendingBotProvision renders the heartbeat payload for daemon.
+//
+// Note: api_url is intentionally NOT included here. Fleet has no reliable
+// source for the IM server URL — `cfg.External.BaseURL` is fleet's own
+// external URL (per octo-lib config contract), not server's. Daemon already
+// resolves api_url from its own `OCTO_SERVER_URL` env / `--api-url` flag,
+// which is the single source of truth for "where is the IM server".
 func (rt *Runtime) buildPendingBotProvision(m *botModel) gin.H {
-	cfg := rt.ctx.GetConfig()
-	apiURL := cfg.External.BaseURL
-	if strings.TrimSpace(apiURL) == "" {
-		apiURL = fmt.Sprintf("http://%s:8090", cfg.External.IP)
-	}
 	return gin.H{
 		"id":           m.Id,
 		"action":       "bot.provision",
+		"runtime_kind": m.RuntimeKind,
 		"workspace_id": m.WorkspaceID,
 		"display_name": m.Name,
 		"bot_uid":      m.BotUID,
 		"bot_token":    m.BotToken,
-		"api_url":      apiURL,
 		"claim_token":  m.ClaimToken,
 	}
 }
@@ -560,73 +663,4 @@ func generateBotToken() string {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
 	return "bf_" + hex.EncodeToString(b)
-}
-
-// GET /v1/runtimes/bots/:id/feed?limit=50
-// Proxies octo-matter /api/v1/internal/bots/:bot_uid/feed.
-// PoC4: derives matter base URL from a recent bot_task row for this bot.
-// If the bot has never run a task there's no callback URL — return empty.
-func (rt *Runtime) getBotFeed(c *wkhttp.Context) {
-	idStr := c.Param("id")
-	id, err := strconv.ParseInt(idStr, 10, 64)
-	if err != nil {
-		c.ResponseError(errors.New("invalid id"))
-		return
-	}
-	m, err := rt.db.queryBotByID(id)
-	if err != nil || m == nil {
-		c.ResponseError(errors.New("bot not found"))
-		return
-	}
-	loginUID := c.GetLoginUID()
-	if m.OwnerUID != loginUID {
-		c.ResponseErrorWithStatus(errors.New("no permission"), http.StatusForbidden)
-		return
-	}
-
-	var matterBaseURL string
-	_ = rt.db.session.SelectBySql(
-		`SELECT matter_base_url FROM bot_task WHERE bot_uid=? AND matter_base_url!='' ORDER BY id DESC LIMIT 1`,
-		m.BotUID,
-	).LoadOne(&matterBaseURL)
-	// PR-B.3: fleet's bot_task table is no longer written to (matter
-	// owns the queue now). Fall back to OCTO_MATTER_URL env so the
-	// feed proxy still works after the cutover.
-	if matterBaseURL == "" {
-		matterBaseURL = os.Getenv("OCTO_MATTER_URL")
-	}
-	if matterBaseURL == "" {
-		c.Response(gin.H{"items": []any{}})
-		return
-	}
-
-	limit := c.DefaultQuery("limit", "50")
-	token := os.Getenv("NOTIFY_INTERNAL_TOKEN")
-	if token == "" {
-		c.ResponseError(errors.New("NOTIFY_INTERNAL_TOKEN unset on server"))
-		return
-	}
-	endpoint := strings.TrimRight(matterBaseURL, "/") + "/api/v1/internal/bots/" + m.BotUID + "/feed?limit=" + limit
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		c.ResponseError(fmt.Errorf("build proxy request: %v", err))
-		return
-	}
-	req.Header.Set("X-Internal-Token", token)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		c.ResponseError(fmt.Errorf("proxy GET: %v", err))
-		return
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
-	if resp.StatusCode >= 300 {
-		rt.Warn("matter feed proxy non-2xx", zap.Int("status", resp.StatusCode), zap.String("body", string(body)))
-		c.ResponseError(fmt.Errorf("matter feed: status %d", resp.StatusCode))
-		return
-	}
-	c.Writer.Header().Set("Content-Type", "application/json")
-	_, _ = c.Writer.Write(body)
 }

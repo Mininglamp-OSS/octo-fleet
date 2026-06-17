@@ -1,11 +1,11 @@
 package runtime
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -21,30 +21,37 @@ import (
 type Runtime struct {
 	ctx *config.Context
 	log.Log
-	db runtimeDB
+	db        runtimeDB
+	eventDB   eventLogDB
+	sseHub    *sseHub
+	providers *providerRegistry
 }
 
 func New(ctx *config.Context) *Runtime {
 	rt := &Runtime{
-		ctx: ctx,
-		Log: log.NewTLog("Runtime"),
-		db:  *newRuntimeDB(ctx),
+		ctx:     ctx,
+		Log:     log.NewTLog("Runtime"),
+		db:      *newRuntimeDB(ctx),
+		eventDB: *newEventLogDB(ctx),
+		sseHub:  newSseHub(),
 	}
-	go rt.runSweeper()
+	rt.providers = newProviderRegistry(&rt.db)
+	go rt.providers.refreshLoop()
 
-	// 版本同步：从 COS 拉取 version.json 写入 runtime_latest_version。
-	// 独立 goroutine，不塞进 runSweeper，失败不影响其他扫描。
-	cfgFile := ctx.GetConfig().ConfigFileUsed()
-	syncer := newVersionSyncer(&rt.db, cfgFile)
-	go syncer.run(context.Background())
+	go rt.runSweeper()
+	go rt.runEventLogSweeper()
 
 	return rt
 }
 
 func (rt *Runtime) Route(r *wkhttp.WKHttp) {
-	// FLEET MIGRATION: auth swapped from user_api_key lookup (server-only
-	// table) to JWT verified against octo-server's JWKS. daemon endpoints
-	// require scope=daemon, web endpoints require scope=web.
+	// FLEET MIGRATION: daemon endpoints authenticated by api_key Bearer
+	// verified against octo-server's POST /v1/auth/verify-api-key
+	// (with verifyCache TTL 60s). web endpoints authenticated by session
+	// token verified against POST /v1/auth/verify?include=context.
+	// The earlier JWT/JWKS scheme was removed in Phase 4 of decisions 1+2
+	// (server PR #290 / fleet PR #24 / matter PR #78); fleet itself no
+	// longer holds or verifies JWTs.
 	daemon := r.Group("/v1/daemon", auth.Middleware("daemon"))
 	{
 		daemon.POST("/register", rt.register)
@@ -53,30 +60,46 @@ func (rt *Runtime) Route(r *wkhttp.WKHttp) {
 		daemon.POST("/ping/:ping_id", rt.pingReport)
 		daemon.POST("/upgrade/:task_id", rt.upgradeReport)
 		daemon.POST("/bots/:id/ack", rt.ackBot)
-		// PR-B.3: bot_task lives in octo-matter now. Daemons ack to
-		// matter, not fleet. Stale daemons still POSTing here would
-		// otherwise hit ackBotTask, which UPDATEs fleet's local
-		// bot_task table AND fires writebacks to matter — that would
-		// duplicate the timeline entry the daemon already wrote, or
-		// fight matter's own claim_token guard.
+		// 决策三 SSE 反向派发: long-lived push 替代 heartbeat 夹带 pending.
+		// 双跑期 (Phase A): SSE 优先, heartbeat pending dispatch 兜底.
+		// daemon 端 dedup file 去重双跑产生的重复.
+		daemon.GET("/events", rt.sseEvents)
+		// 决策三 A3: bot_provision secret fetch (token 不进 SSE stream).
+		daemon.GET("/bot-provisions/:command_id", rt.fetchBotProvision)
+		// PR-B.3: bot_task ownership moved to octo-matter; daemons ack to
+		// matter directly via POST /api/v1/internal/bot-tasks/:id/ack.
+		// Pre-cleanup, stale daemons posting here hit the (now-removed)
+		// ackBotTask handler, which UPDATEd fleet's local bot_task table
+		// AND fired writebacks to matter — that duplicated entries or
+		// fought matter's claim_token guard. v3.4 cleanup PR deleted the
+		// handler; the 410 stub remains for deploy-compatibility (stale
+		// daemons get an actionable 410 with migration hint).
 		daemon.POST("/bot-tasks/:id/ack", rt.ackBotTaskDeprecated)
+		daemon.GET("/runtime-providers", rt.listProviders)
 	}
 
 	internal := r.Group("/v1/internal", rt.internalTokenAuth())
 	{
-		// PR-B.3: bot_task ownership moved to matter (see octo-matter
-		// migrations/008_bot_task.sql). Fleet no longer accepts task
-		// enqueue requests. The route is closed off but the handler
-		// implementation is kept until PR-C for rollback.
+		// PR-B.3 closed off the route; v3.4 cleanup PR removed the
+		// handler implementation. Only the 410 stub remains for
+		// stale-daemon compatibility (see ackBotTaskDeprecated above).
+		// runtime-20260601-01.sql bot_task table is intentionally NOT
+		// dropped — production rows may exist, DROP TABLE needs explicit
+		// data-archive evaluation (separate decision).
 		internal.POST("/bot-tasks", rt.createBotTaskDeprecated)
+	}
+
+	// runtime-latest-versions 写入口权限高(能改 daemon 升级产物来源),用专用
+	// admin token 鉴权,不与上面宽泛的 NOTIFY_INTERNAL_TOKEN 共用。
+	runtimeAdmin := r.Group("/v1/internal", rt.runtimeAdminTokenAuth())
+	{
+		runtimeAdmin.POST("/runtime-latest-versions", rt.upsertLatestVersionAdmin)
 	}
 
 	authGroup := r.Group("/v1", auth.Middleware("web"))
 	{
 		authGroup.GET("/runtimes", rt.list)
 		authGroup.DELETE("/runtimes/:id", rt.deleteRuntime)
-		authGroup.POST("/runtimes/ping", rt.pingInit)
-		authGroup.GET("/runtimes/ping/:ping_id", rt.pingGet)
 		authGroup.POST("/runtimes/upgrade", rt.upgradeInit)
 		authGroup.GET("/runtimes/upgrade/:task_id", rt.upgradeGet)
 		authGroup.POST("/runtimes/bots", rt.createBot)
@@ -86,7 +109,6 @@ func (rt *Runtime) Route(r *wkhttp.WKHttp) {
 		authGroup.GET("/runtimes/bots", rt.listBots)
 		authGroup.GET("/runtimes/bots/:id", rt.getBot)
 		authGroup.DELETE("/runtimes/bots/:id", rt.archiveBot)
-		authGroup.GET("/runtimes/bots/:id/feed", rt.getBotFeed)
 	}
 }
 
@@ -120,13 +142,38 @@ func (rt *Runtime) register(c *wkhttp.Context) {
 		return
 	}
 
-	ownerUID := c.MustGet("owner_uid").(string)
+	// Server-side clamp on daemon-reported heartbeat interval. 0 means
+	// "use sweeper default" (see runSweeper). Below 1s would race the
+	// sweeper; above 5min undermines stale detection entirely. Out-of-
+	// range values fall back to 0 (=default) rather than erroring the
+	// register — a misbehaving daemon should still register.
+	const minHeartbeatIntervalMs = 1000
+	const maxHeartbeatIntervalMs = 300000
+	if req.HeartbeatIntervalMs != 0 &&
+		(req.HeartbeatIntervalMs < minHeartbeatIntervalMs || req.HeartbeatIntervalMs > maxHeartbeatIntervalMs) {
+		rt.Warn("daemon-reported heartbeat_interval_ms out of range, falling back to default",
+			zap.String("daemon_id", req.DaemonID),
+			zap.Int64("reported_ms", req.HeartbeatIntervalMs),
+			zap.Int64("min_ms", minHeartbeatIntervalMs),
+			zap.Int64("max_ms", maxHeartbeatIntervalMs),
+		)
+		req.HeartbeatIntervalMs = 0
+	}
+
+	ownerUID := c.MustGet("uid").(string)
 	spaceID := c.MustGet("space_id").(string)
 
 	var registered []registeredRuntimeResp
 
 	for _, r := range req.Runtimes {
 		if r.Type == "" {
+			continue
+		}
+		// 去 codex/hermes 的服务端权威过滤:老 daemon 仍探测/上报 disabled
+		// provider 时,fleet 直接丢弃不写 agent_runtime(不依赖 daemon 升级)。
+		if !rt.providers.IsActiveKind(r.Type) {
+			rt.Info("skip disabled/unknown provider on register",
+				zap.String("provider", r.Type), zap.String("daemon_id", req.DaemonID))
 			continue
 		}
 		status := r.Status
@@ -146,17 +193,18 @@ func (rt *Runtime) register(c *wkhttp.Context) {
 		metaBytes, _ := json.Marshal(metaMap)
 
 		m := &agentRuntimeModel{
-			SpaceID:     spaceID,
-			DaemonID:    req.DaemonID,
-			Name:        r.Name,
-			Provider:    r.Type,
-			RuntimeMode: "local",
-			Status:      status,
-			Version:     r.Version,
-			DeviceName:  req.DeviceName,
-			DeviceInfo:  req.DeviceInfo,
-			Metadata:    string(metaBytes),
-			OwnerUID:    ownerUID,
+			SpaceID:             spaceID,
+			DaemonID:            req.DaemonID,
+			Name:                r.Name,
+			Provider:            r.Type,
+			RuntimeMode:         "local",
+			Status:              status,
+			Version:             r.Version,
+			DeviceName:          req.DeviceName,
+			DeviceInfo:          req.DeviceInfo,
+			Metadata:            string(metaBytes),
+			OwnerUID:            ownerUID,
+			HeartbeatIntervalMs: req.HeartbeatIntervalMs,
 		}
 
 		id, err := rt.db.upsert(m)
@@ -172,18 +220,20 @@ func (rt *Runtime) register(c *wkhttp.Context) {
 		})
 
 		// 插件升级关单：用本次 upsert 返回的 id + 插件版本，匹配任务 metadata.runtime_id
+		// v3.3.1 §C.2: pass spaceID + ownerUID so a cross-owner daemon_id
+		// collision can't complete the wrong owner's upgrade task.
 		for _, p := range r.Plugins {
 			if p.Name != "" && p.Version != "" {
-				rt.db.completeUpgradeIfMatchedWithRuntime(req.DaemonID, p.Name, p.Version, id)
+				rt.db.completeUpgradeIfMatchedWithRuntime(req.DaemonID, spaceID, ownerUID, p.Name, p.Version, id)
 			}
 		}
 
-		// Provider 组件升级关单（claude/codex/openclaw/hermes）：
-		// 按 daemon_id + provider + version + runtime_id 匹配。runtime.version 即 detected CLI 版本。
-		// 服务端 createComponentUpgradeTask 只允许 providerComponents 白名单创建任务，
-		// 这里无需再次白名单过滤：非白名单 provider 根本不会有对应 in-progress 任务可以关。
+		// Provider 组件升级关单（claude/openclaw 等 active provider）：
+		// 按 (space, daemon_id, owner, provider, version, runtime_id) 匹配.
+		// 服务端 upgradeInit 只允许 active provider（registry IsActiveKind）创建任务，
+		// 这里无需再次过滤：非 active provider 根本不会有对应 in-progress 任务可以关。
 		if r.Version != "" {
-			rt.db.completeUpgradeIfMatchedWithRuntime(req.DaemonID, r.Type, r.Version, id)
+			rt.db.completeUpgradeIfMatchedWithRuntime(req.DaemonID, spaceID, ownerUID, r.Type, r.Version, id)
 		}
 	}
 
@@ -193,9 +243,11 @@ func (rt *Runtime) register(c *wkhttp.Context) {
 		zap.Int("runtime_count", len(registered)),
 	)
 
-	// 升级关单：注册成功后检查是否有匹配的升级任务
+	// 升级关单：注册成功后检查是否有匹配的升级任务. v3.3.1 §C.2: scoped
+	// by (space, owner) so cross-owner same-daemon_id can't complete
+	// another owner's daemon-cli upgrade.
 	if req.CLIVersion != "" {
-		rt.db.completeUpgradeIfMatched(req.DaemonID, "octo-daemon", req.CLIVersion)
+		rt.db.completeUpgradeIfMatched(req.DaemonID, spaceID, ownerUID, "octo-daemon", req.CLIVersion)
 	}
 
 	c.Response(gin.H{
@@ -203,7 +255,77 @@ func (rt *Runtime) register(c *wkhttp.Context) {
 	})
 }
 
-// POST /v1/daemon/heartbeat
+type providerInfo struct {
+	Name              string `json:"name"`
+	DisplayName       string `json:"display_name"`
+	BinaryName        string `json:"binary_name"`
+	UpgradeTimeoutSec int    `json:"upgrade_timeout_sec"`
+}
+
+// GET /v1/daemon/runtime-providers — daemon 拉取 active provider 列表(PR-C 消费)。
+func (rt *Runtime) listProviders(c *wkhttp.Context) {
+	snap := rt.providers.current()
+	var out []providerInfo
+	for _, name := range snap.ActiveNames() {
+		d := snap.byName[name]
+		out = append(out, providerInfo{
+			Name: d.Name, DisplayName: d.DisplayName,
+			BinaryName: d.BinaryName, UpgradeTimeoutSec: d.UpgradeTimeoutSec,
+		})
+	}
+	c.Response(gin.H{"providers": out})
+}
+
+type upsertLatestVersionReq struct {
+	Component     string          `json:"component"`
+	LatestVersion string          `json:"latest_version"`
+	ReleaseMeta   json.RawMessage `json:"release_meta"` // 可选 JSON 对象(daemon 自升级需要 assets+checksum)
+}
+
+// POST /v1/internal/runtime-latest-versions — 人工维护 runtime_latest_version
+// (替代已停的 COS 同步器)。专用 admin token 鉴权(OCTO_RUNTIME_ADMIN_TOKEN
+// + X-Runtime-Admin-Token),非通用 internal token。
+func (rt *Runtime) upsertLatestVersionAdmin(c *wkhttp.Context) {
+	var req upsertLatestVersionReq
+	if err := c.BindJSON(&req); err != nil {
+		c.ResponseError(errors.New("invalid request body"))
+		return
+	}
+	// component 白名单:daemon / 插件(octo + cc-octo) / active provider
+	valid := req.Component == componentDaemon || isPluginComponent(req.Component) || rt.providers.IsActiveKind(req.Component)
+	if !valid {
+		c.ResponseError(fmt.Errorf("component %q not in registry/whitelist", req.Component))
+		return
+	}
+	if !semverLike(req.LatestVersion) {
+		c.ResponseError(fmt.Errorf("latest_version %q not semver-like", req.LatestVersion))
+		return
+	}
+	// release_meta 可选:nil(省略)和 JSON "null" 都视为无;非空必须是合法 JSON。
+	hasReleaseMeta := req.ReleaseMeta != nil && string(req.ReleaseMeta) != "null"
+	if hasReleaseMeta && !json.Valid(req.ReleaseMeta) {
+		c.ResponseError(errors.New("release_meta must be valid JSON"))
+		return
+	}
+	releaseMeta := ""
+	if hasReleaseMeta {
+		releaseMeta = string(req.ReleaseMeta)
+	}
+	if err := rt.db.upsertLatestVersion(req.Component, req.LatestVersion, releaseMeta); err != nil {
+		rt.Error("admin upsert latest version", zap.Error(err))
+		c.ResponseError(errors.New("upsert failed"))
+		return
+	}
+	rt.Info("admin upserted latest version",
+		zap.String("component", req.Component), zap.String("version", req.LatestVersion))
+	c.Response(gin.H{"ok": true})
+}
+
+// semverLikeRe 宽松校验:可选 v 前缀、2-3 段数字、可选预发布/构建后缀。包级编译一次。
+var semverLikeRe = regexp.MustCompile(`^v?\d+\.\d+(\.\d+)?([-+].+)?$`)
+
+func semverLike(v string) bool { return semverLikeRe.MatchString(v) }
+
 func (rt *Runtime) heartbeat(c *wkhttp.Context) {
 	var req heartbeatReq
 	if err := c.BindJSON(&req); err != nil {
@@ -215,7 +337,7 @@ func (rt *Runtime) heartbeat(c *wkhttp.Context) {
 		return
 	}
 
-	ownerUID := c.MustGet("owner_uid").(string)
+	ownerUID := c.MustGet("uid").(string)
 	spaceID := c.MustGet("space_id").(string)
 
 	existing, err := rt.db.queryByID(req.RuntimeID)
@@ -234,17 +356,10 @@ func (rt *Runtime) heartbeat(c *wkhttp.Context) {
 		return
 	}
 
-	// Atomically claim a pending ping for this daemon (prevents duplicate dispatch)
 	resp := gin.H{"status": "ok"}
-	claimedPing, _ := rt.db.claimPendingPing(spaceID, existing.DaemonID, time.Now().UnixMilli())
-	if claimedPing != nil {
-		resp["pending_ping"] = gin.H{
-			"ping_id": claimedPing.ID,
-		}
-	}
 
 	// Atomically claim a pending upgrade task
-	claimedUpgrade, _ := rt.db.claimPendingUpgrade(spaceID, existing.DaemonID)
+	claimedUpgrade, _ := rt.db.claimPendingUpgrade(spaceID, existing.DaemonID, ownerUID)
 	if claimedUpgrade != nil {
 		resp["pending_upgrade"] = gin.H{
 			"task_id":        claimedUpgrade.ID,
@@ -259,7 +374,7 @@ func (rt *Runtime) heartbeat(c *wkhttp.Context) {
 	// Atomically claim a pending bot.provision command for this daemon.
 	// PoC4: single composite command replaces PoC1's two-step agent.create
 	// + bot.add cycle.
-	claimedBot, _ := rt.db.claimPendingBotProvision(existing.DaemonID)
+	claimedBot, _ := rt.db.claimPendingBotProvision(existing.DaemonID, existing.SpaceID, ownerUID, existing.Provider)
 	if claimedBot != nil {
 		resp["pending_command"] = rt.buildPendingBotProvision(claimedBot)
 	}
@@ -267,7 +382,10 @@ func (rt *Runtime) heartbeat(c *wkhttp.Context) {
 	// PR-B.2: managed_bots tells the daemon which bots to poll from
 	// matter on this heartbeat tick. PR-B.3 dropped the legacy
 	// pending_task fallback — daemon expects matter-only dispatch now.
-	managed, mberr := rt.db.listActiveBotsForDaemon(existing.DaemonID)
+	// v3 §4.3: scoped to (existing.SpaceID, ownerUID) so a cross-owner
+	// daemon_id collision (legal until §4.4 schema migration lands) can't
+	// leak the other owner's bot inventory through this heartbeat hint.
+	managed, mberr := rt.db.listActiveBotsForDaemon(existing.DaemonID, existing.SpaceID, ownerUID)
 	if mberr != nil {
 		rt.Warn("listActiveBotsForDaemon failed", zap.Error(mberr), zap.String("daemon_id", existing.DaemonID))
 	} else if len(managed) > 0 {
@@ -285,7 +403,7 @@ func (rt *Runtime) deregister(c *wkhttp.Context) {
 		return
 	}
 
-	ownerUID := c.MustGet("owner_uid").(string)
+	ownerUID := c.MustGet("uid").(string)
 	spaceID := c.MustGet("space_id").(string)
 
 	for _, id := range req.RuntimeIDs {
@@ -331,7 +449,7 @@ func (rt *Runtime) list(c *wkhttp.Context) {
 		return
 	}
 
-	models, err := rt.db.listBySpaceIDAndOwner(spaceID, loginUID)
+	models, err := rt.db.listBySpaceIDAndOwner(spaceID, loginUID, rt.providers.ActiveNames())
 	if err != nil {
 		rt.Error("list runtimes", zap.Error(err))
 		c.ResponseError(errors.New("query failed"))
@@ -367,24 +485,10 @@ func (rt *Runtime) list(c *wkhttp.Context) {
 				}
 			}
 
-			if r.Provider == "openclaw" && r.Metadata != "" {
-				if pluginLatest, ok := latestVersions["octo"]; ok && pluginLatest != "" {
-					var meta map[string]interface{}
-					if json.Unmarshal([]byte(r.Metadata), &meta) == nil {
-						plugins, _ := meta["plugins"].([]interface{})
-						for _, p := range plugins {
-							pm, _ := p.(map[string]interface{})
-							if pm["name"] == "octo" {
-								pv, _ := pm["version"].(string)
-								if pv != "" && isVersionOlder(pv, pluginLatest) {
-									hint["plugin_has_update"] = true
-									hint["plugin_latest_version"] = pluginLatest
-									hasHint = true
-								}
-							}
-						}
-					}
-				}
+			if pluginHas, pluginLatest := computePluginHint(r.Provider, r.Metadata, latestVersions); pluginHas {
+				hint["plugin_has_update"] = true
+				hint["plugin_latest_version"] = pluginLatest
+				hasHint = true
 			}
 
 			if hasHint {
@@ -504,126 +608,15 @@ func (rt *Runtime) deleteRuntime(c *wkhttp.Context) {
 	c.ResponseOK()
 }
 
-// POST /v1/runtimes/ping — initiate ping to a daemon
-func (rt *Runtime) pingInit(c *wkhttp.Context) {
-	var req pingInitReq
-	if err := c.BindJSON(&req); err != nil {
-		c.ResponseError(errors.New("invalid request body"))
-		return
-	}
-	if req.DaemonID == "" || req.SpaceID == "" {
-		c.ResponseError(errors.New("daemon_id and space_id are required"))
-		return
-	}
-
-	loginUID := c.GetLoginUID()
-	// FLEET MIGRATION: trust JWT.space_id and only verify the agent_runtime
-	// exists in that space (no JOIN to space_member which fleet can't see).
-	if !auth.MatchesSpace(c, req.SpaceID) {
-		c.ResponseErrorWithStatus(errors.New("no permission to ping this device"), 403)
-		return
-	}
-	var accessCount int
-	if err := rt.db.session.SelectBySql(
-		`SELECT COUNT(*) FROM agent_runtime WHERE space_id = ? AND daemon_id = ?`,
-		req.SpaceID, req.DaemonID,
-	).LoadOne(&accessCount); err != nil {
-		rt.Error("check daemon access", zap.Error(err))
-		c.ResponseError(errors.New("query failed"))
-		return
-	}
-	if accessCount == 0 {
-		c.ResponseErrorWithStatus(errors.New("no permission to ping this device"), 403)
-		return
-	}
-	_ = loginUID
-
-	pingID := fmt.Sprintf("ping_%d", time.Now().UnixNano())
-	entry := &pingEntry{
-		ID:       pingID,
-		DaemonID: req.DaemonID,
-		SpaceID:  req.SpaceID,
-		ServerTS: time.Now().UnixMilli(),
-		Status:   "pending",
-	}
-	if err := rt.db.insertPing(entry); err != nil {
-		rt.Error("insert ping", zap.Error(err))
-		c.ResponseError(errors.New("ping init failed"))
-		return
-	}
-
-	go func() {
-		time.Sleep(30 * time.Second)
-		rt.db.timeoutPing(pingID)
-	}()
-
-	c.Response(gin.H{"ping_id": pingID})
-}
-
-// POST /v1/daemon/ping/:ping_id — daemon reports ping result
+// POST /v1/daemon/ping/:ping_id — grayscale no-op.
+// Server Ping was removed in this PR; the daemon-side report call is
+// deleted in the follow-up PR2-daemon. Until that ships, in-flight
+// daemons may still POST here. This shim returns 200 without touching
+// any storage (runtime_ping is dropped in runtime-20260616-01), so a
+// stale daemon's report neither errors nor blocks. Delete this route
+// once PR2-daemon has rolled out everywhere.
 func (rt *Runtime) pingReport(c *wkhttp.Context) {
-	pingID := c.Param("ping_id")
-
-	entry, err := rt.db.getPing(pingID)
-	if err != nil || entry == nil {
-		c.ResponseError(errors.New("ping not found"))
-		return
-	}
-
-	ownerUID := c.MustGet("owner_uid").(string)
-	apiSpaceID := c.MustGet("space_id").(string)
-	if entry.SpaceID != apiSpaceID {
-		c.ResponseErrorWithStatus(errors.New("no permission"), 403)
-		return
-	}
-	var daemonMatch int
-	_ = rt.db.session.SelectBySql(
-		`SELECT COUNT(*) FROM agent_runtime WHERE space_id=? AND daemon_id=? AND owner_uid=?`,
-		entry.SpaceID, entry.DaemonID, ownerUID,
-	).LoadOne(&daemonMatch)
-	if daemonMatch == 0 {
-		c.ResponseErrorWithStatus(errors.New("no permission"), 403)
-		return
-	}
-
-	// RTT = now (server receives report) - server_ts (server dispatched via heartbeat)
-	nowMS := time.Now().UnixMilli()
-	rtt := nowMS - entry.ServerTS
-	if rtt < 0 {
-		rtt = 0
-	}
-
-	if err := rt.db.updatePingResult(pingID, nowMS, rtt); err != nil {
-		rt.Error("update ping result", zap.Error(err))
-		c.ResponseError(errors.New("update failed"))
-		return
-	}
-
 	c.Response(gin.H{"status": "ok"})
-}
-
-// GET /v1/runtimes/ping/:ping_id — get ping result
-func (rt *Runtime) pingGet(c *wkhttp.Context) {
-	pingID := c.Param("ping_id")
-	entry, err := rt.db.getPing(pingID)
-	if err != nil || entry == nil {
-		c.ResponseError(errors.New("ping not found"))
-		return
-	}
-
-	loginUID := c.GetLoginUID()
-	// FLEET MIGRATION: trust JWT.space_id (see auth.MatchesSpace).
-	if !auth.MatchesSpace(c, entry.SpaceID) {
-		c.ResponseErrorWithStatus(errors.New("no permission"), 403)
-		return
-	}
-	_ = loginUID
-
-	c.Response(gin.H{
-		"ping_id": entry.ID,
-		"status":  entry.Status,
-		"rtt_ms":  entry.RTT,
-	})
 }
 
 func isVersionOlder(current, latest string) bool {
@@ -680,18 +673,35 @@ func isVersionOlder(current, latest string) bool {
 }
 
 func (rt *Runtime) runSweeper() {
-	ticker := time.NewTicker(30 * time.Second)
+	// Per-runtime stale threshold = 3 × daemon-reported heartbeat_interval_ms
+	// (stored on agent_runtime by register). When a daemon registers
+	// against an older fleet (no column), or doesn't yet report the field,
+	// markStaleOffline falls back to defaultHeartbeatIntervalMs below.
+	// staleThreshold here is only used for grace + cold-start scheduling.
+	const defaultHeartbeatIntervalMs int64 = 5000
+	const staleThreshold = 3 * time.Duration(defaultHeartbeatIntervalMs) * time.Millisecond
+	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
+	// Cold-start grace: skip stale check for 2× staleThreshold after boot.
+	// Without this, fleet restart can mark all daemons stale before they
+	// finish their first post-restart heartbeat round.
+	//
+	// graceUntil uses time.Now() which carries a monotonic clock reading;
+	// time.Now().Before(graceUntil) compares monotonic readings, so NTP
+	// wall-clock jumps during the grace window cannot skip it short.
+	graceUntil := time.Now().Add(2 * staleThreshold)
+
 	for range ticker.C {
-		staleThreshold := 45 * time.Second
-		n, err := rt.db.markStaleOffline(staleThreshold)
-		if err != nil {
-			rt.Error("sweep stale runtimes", zap.Error(err))
-			continue
-		}
-		if n > 0 {
-			rt.Info("marked stale runtimes offline", zap.Int64("count", n))
+		if !time.Now().Before(graceUntil) {
+			n, err := rt.db.markStaleOffline(defaultHeartbeatIntervalMs)
+			if err != nil {
+				rt.Error("sweep stale runtimes", zap.Error(err))
+				continue
+			}
+			if n > 0 {
+				rt.Info("marked stale runtimes offline", zap.Int64("count", n))
+			}
 		}
 
 		gcThreshold := 7 * 24 * time.Hour
@@ -704,13 +714,11 @@ func (rt *Runtime) runSweeper() {
 			rt.Info("gc'd old offline runtimes", zap.Int64("count", deleted))
 		}
 
-		if cleaned, err := rt.db.cleanOldPings(5 * time.Minute); err != nil {
-			rt.Error("clean old pings", zap.Error(err))
-		} else if cleaned > 0 {
-			rt.Info("cleaned old ping entries", zap.Int64("count", cleaned))
+		active := map[string]int{}
+		for _, n := range rt.providers.ActiveNames() {
+			active[n] = rt.providers.TimeoutSec(n)
 		}
-
-		rt.db.timeoutStaleUpgrades()
+		rt.db.timeoutStaleUpgrades(active)
 	}
 }
 

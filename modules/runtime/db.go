@@ -23,14 +23,16 @@ func newRuntimeDB(ctx *config.Context) *runtimeDB {
 
 func (d *runtimeDB) upsert(m *agentRuntimeModel) (int64, error) {
 	result, err := d.session.InsertBySql(`
-		INSERT INTO agent_runtime (space_id, daemon_id, name, provider, runtime_mode, status, version, device_name, device_info, metadata, owner_uid, last_seen_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+		INSERT INTO agent_runtime (space_id, daemon_id, name, provider, runtime_mode, status, version, device_name, device_info, metadata, owner_uid, heartbeat_interval_ms, last_seen_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
 		ON DUPLICATE KEY UPDATE
 			name=VALUES(name), status=VALUES(status), version=VALUES(version),
 			device_name=VALUES(device_name), device_info=VALUES(device_info),
-			metadata=VALUES(metadata), last_seen_at=NOW()`,
+			metadata=VALUES(metadata),
+			heartbeat_interval_ms=IF(VALUES(heartbeat_interval_ms)>0, VALUES(heartbeat_interval_ms), heartbeat_interval_ms),
+			last_seen_at=NOW()`,
 		m.SpaceID, m.DaemonID, m.Name, m.Provider, m.RuntimeMode,
-		m.Status, m.Version, m.DeviceName, m.DeviceInfo, m.Metadata, m.OwnerUID,
+		m.Status, m.Version, m.DeviceName, m.DeviceInfo, m.Metadata, m.OwnerUID, m.HeartbeatIntervalMs,
 	).Exec()
 	if err != nil {
 		return 0, err
@@ -41,7 +43,7 @@ func (d *runtimeDB) upsert(m *agentRuntimeModel) (int64, error) {
 		return 0, err
 	}
 	if id == 0 {
-		existing, err := d.queryByUniqueKey(m.SpaceID, m.DaemonID, m.Provider)
+		existing, err := d.queryByUniqueKey(m.SpaceID, m.DaemonID, m.Provider, m.OwnerUID)
 		if err != nil {
 			return 0, err
 		}
@@ -52,10 +54,13 @@ func (d *runtimeDB) upsert(m *agentRuntimeModel) (int64, error) {
 	return id, nil
 }
 
-func (d *runtimeDB) queryByUniqueKey(spaceID, daemonID, provider string) (*agentRuntimeModel, error) {
+// queryByUniqueKey looks up the agent_runtime row by the 4-tuple unique
+// key (v3 §4.4: owner_uid added to the key so two owners sharing a
+// daemon_id in the same space don't collide).
+func (d *runtimeDB) queryByUniqueKey(spaceID, daemonID, provider, ownerUID string) (*agentRuntimeModel, error) {
 	var m *agentRuntimeModel
 	_, err := d.session.Select("*").From("agent_runtime").
-		Where("space_id=? AND daemon_id=? AND provider=?", spaceID, daemonID, provider).
+		Where("space_id=? AND daemon_id=? AND provider=? AND owner_uid=?", spaceID, daemonID, provider, ownerUID).
 		Load(&m)
 	return m, err
 }
@@ -68,14 +73,40 @@ func (d *runtimeDB) queryByID(id int64) (*agentRuntimeModel, error) {
 	return m, err
 }
 
-func (d *runtimeDB) listBySpaceIDAndOwner(spaceID, ownerUID string) ([]*agentRuntimeModel, error) {
+func (d *runtimeDB) listBySpaceIDAndOwner(spaceID, ownerUID string, activeProviders []string) ([]*agentRuntimeModel, error) {
+	// active 为空 = 没有任何 active provider 可见,返回空(而非退化成不过滤列出全部)。
+	if len(activeProviders) == 0 {
+		return []*agentRuntimeModel{}, nil
+	}
 	var list []*agentRuntimeModel
-	_, err := d.session.Select("*").From("agent_runtime").
+	q := d.session.Select("*").From("agent_runtime").
 		Where("space_id=? AND owner_uid=?", spaceID, ownerUID).
-		OrderDir("status", false).
-		OrderAsc("name").
-		Load(&list)
+		Where("provider IN ?", activeProviders) // dbr 展开为 IN (...)
+	_, err := q.OrderDir("status", false).OrderAsc("name").Load(&list)
 	return list, err
+}
+
+// firstRuntimeIDForDaemon 解析 (space, daemon, owner) 对应的任一**在线**
+// runtime id, 用作 daemon-level SSE event (daemon 自身 upgrade) 的
+// push 目标. SSE channel 是 per-runtime (决策三 v6 §Q2), 而 daemon-
+// upgrade 是 daemon 级事件 — 推到任一在线 runtime 即触发 daemon 处理
+// (daemon-side dedup 按 event_type+source_pk 防同事件多 runtime 重复处理).
+//
+// status='online' 过滤 (F3 caster review final): 若最老 runtime offline
+// (CLI 卸载/故障) 推到死 channel 会静默丢, daemon 退 heartbeat 5-7s 兜底
+// 失去 SSE 加速意义. 过滤后取最老的在线 runtime, 全 offline 才返 0.
+//
+// 返回 0 表示该 daemon 没有 online runtime, 这种情况 dispatcher 跳过
+// in-mem push, event 仍写 log, daemon 下次连上后走 Last-Event-ID 重放.
+func (d *runtimeDB) firstRuntimeIDForDaemon(spaceID, daemonID, ownerUID string) (int64, error) {
+	var id int64
+	_, err := d.session.SelectBySql(
+		`SELECT id FROM agent_runtime
+		 WHERE space_id=? AND daemon_id=? AND owner_uid=? AND status='online'
+		 ORDER BY id ASC LIMIT 1`,
+		spaceID, daemonID, ownerUID,
+	).Load(&id)
+	return id, err
 }
 
 func (d *runtimeDB) updateHeartbeat(id int64) error {
@@ -98,12 +129,18 @@ func (d *runtimeDB) setOffline(ids []int64) error {
 	return err
 }
 
-func (d *runtimeDB) markStaleOffline(threshold time.Duration) (int64, error) {
-	cutoff := time.Now().Add(-threshold)
-	result, err := d.session.Update("agent_runtime").
-		Set("status", "offline").
-		Where("status=? AND last_seen_at < ?", "online", cutoff).
-		Exec()
+// markStaleOffline marks every "online" agent_runtime whose last_seen_at
+// is older than its per-row stale threshold. Per-runtime threshold =
+// 3 × heartbeat_interval_ms (or 3 × defaultIntervalMs when the column
+// is 0/unset). Returns the number of rows flipped.
+func (d *runtimeDB) markStaleOffline(defaultIntervalMs int64) (int64, error) {
+	result, err := d.session.UpdateBySql(
+		`UPDATE agent_runtime
+		    SET status='offline'
+		  WHERE status='online'
+		    AND last_seen_at < DATE_SUB(NOW(), INTERVAL (IF(heartbeat_interval_ms>0, heartbeat_interval_ms, ?) * 3 / 1000) SECOND)`,
+		defaultIntervalMs,
+	).Exec()
 	if err != nil {
 		return 0, err
 	}
@@ -152,93 +189,19 @@ func (d *runtimeDB) queryLatestVersions() (map[string]string, error) {
 }
 
 // upsertLatestVersion inserts or updates a component's latest version + release_meta.
-// Called by version syncer after pulling version.json from COS.
+// Source is now the internal admin endpoint (POST /v1/internal/runtime-latest-versions);
+// the COS version syncer was removed, so this table is maintained manually.
+// 空 releaseMeta 表示"不更新 release_meta"——保留已有值(避免省略该字段时清空
+// daemon 自升级所需的 assets/checksums)。新行 release_meta 默认 ''。
 func (d *runtimeDB) upsertLatestVersion(component, latestVersion, releaseMeta string) error {
 	_, err := d.session.InsertBySql(
 		`INSERT INTO runtime_latest_version (component, latest_version, release_meta)
 		 VALUES (?, ?, ?)
-		 ON DUPLICATE KEY UPDATE latest_version=VALUES(latest_version), release_meta=VALUES(release_meta)`,
+		 ON DUPLICATE KEY UPDATE latest_version=VALUES(latest_version),
+		   release_meta=IF(VALUES(release_meta)='', release_meta, VALUES(release_meta))`,
 		component, latestVersion, releaseMeta,
 	).Exec()
 	return err
-}
-
-// Ping DB operations
-
-func (d *runtimeDB) insertPing(p *pingEntry) error {
-	_, err := d.session.InsertBySql(
-		`INSERT INTO runtime_ping (id, space_id, daemon_id, server_ts, status) VALUES (?, ?, ?, ?, ?)`,
-		p.ID, p.SpaceID, p.DaemonID, p.ServerTS, p.Status,
-	).Exec()
-	return err
-}
-
-// claimPendingPing atomically claims a pending ping by setting status to 'dispatched'.
-// Returns the claimed ping entry, or nil if none pending.
-func (d *runtimeDB) claimPendingPing(spaceID, daemonID string, dispatchTS int64) (*pingEntry, error) {
-	// Atomic: only one heartbeat can claim each ping
-	result, err := d.session.UpdateBySql(
-		`UPDATE runtime_ping SET status='dispatched', server_ts=? WHERE space_id=? AND daemon_id=? AND status='pending' ORDER BY created_at DESC LIMIT 1`,
-		dispatchTS, spaceID, daemonID,
-	).Exec()
-	if err != nil {
-		return nil, err
-	}
-	rows, _ := result.RowsAffected()
-	if rows == 0 {
-		return nil, nil
-	}
-	// Fetch the one we just claimed
-	var p *pingEntry
-	_, err = d.session.SelectBySql(
-		`SELECT id, space_id, daemon_id, server_ts, daemon_ts, rtt_ms, status FROM runtime_ping WHERE space_id=? AND daemon_id=? AND status='dispatched' ORDER BY created_at DESC LIMIT 1`,
-		spaceID, daemonID,
-	).Load(&p)
-	return p, err
-}
-
-func (d *runtimeDB) getPing(pingID string) (*pingEntry, error) {
-	var p *pingEntry
-	_, err := d.session.SelectBySql(
-		`SELECT id, space_id, daemon_id, server_ts, daemon_ts, rtt_ms, status FROM runtime_ping WHERE id=?`,
-		pingID,
-	).Load(&p)
-	return p, err
-}
-
-func (d *runtimeDB) updatePingResult(pingID string, daemonTS, rtt int64) error {
-	_, err := d.session.UpdateBySql(
-		`UPDATE runtime_ping SET daemon_ts=?, rtt_ms=?, status='done' WHERE id=? AND status='dispatched'`,
-		daemonTS, rtt, pingID,
-	).Exec()
-	return err
-}
-
-func (d *runtimeDB) timeoutPing(pingID string) error {
-	_, err := d.session.UpdateBySql(
-		`UPDATE runtime_ping SET status='timeout' WHERE id=? AND status='pending'`,
-		pingID,
-	).Exec()
-	return err
-}
-
-func (d *runtimeDB) timeoutStalePending() {
-	d.session.UpdateBySql(
-		`UPDATE runtime_ping SET status='timeout' WHERE status IN ('pending','dispatched') AND created_at < DATE_SUB(NOW(), INTERVAL 60 SECOND)`,
-	).Exec()
-}
-
-func (d *runtimeDB) cleanOldPings(maxAge time.Duration) (int64, error) {
-	d.timeoutStalePending()
-	cutoff := time.Now().Add(-maxAge)
-	result, err := d.session.DeleteBySql(
-		`DELETE FROM runtime_ping WHERE status NOT IN ('pending','dispatched') AND created_at < ?`,
-		cutoff,
-	).Exec()
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
 }
 
 func formatTime(t time.Time) string {
@@ -302,11 +265,17 @@ func (d *runtimeDB) queryBotInfoByUIDsLegacy(spaceID string, uids []string) (map
 	return result, nil
 }
 
-
 // listActiveBotsForDaemon returns bot_uid + workspace_id for every active
-// bot whose runtime is hosted by this daemon. Daemon iterates the list on
-// each heartbeat to pull tasks for each bot from matter.
-func (d *runtimeDB) listActiveBotsForDaemon(daemonID string) ([]struct {
+// bot whose runtime is hosted by this daemon, scoped to (space, owner).
+//
+// v3 §4.3 (Jerry-Xin Critical 1): the prior (daemonID-only) signature
+// joined bots across owners — same space + same daemon_id (allowed by
+// register's non-unique (space,daemon_id,provider) key pre-§4.4) could
+// surface another owner's active bot inventory (bot_uid + workspace_id
+// leak). Scoping by (space, owner) closes that without changing the
+// heartbeat happy-path. Caller (heartbeat) already has both values from
+// the agent_runtime row it just loaded — no N+1.
+func (d *runtimeDB) listActiveBotsForDaemon(daemonID, spaceID, ownerUID string) ([]struct {
 	BotUID      string `json:"bot_uid" db:"bot_uid"`
 	WorkspaceID string `json:"workspace_id" db:"workspace_id"`
 }, error) {
@@ -318,8 +287,9 @@ func (d *runtimeDB) listActiveBotsForDaemon(daemonID string) ([]struct {
 	_, err := d.session.SelectBySql(
 		`SELECT b.bot_uid, b.workspace_id
 		   FROM bot b
-		  WHERE b.daemon_id=? AND b.status='active' AND b.bot_uid!=''`,
-		daemonID,
+		  WHERE b.daemon_id=? AND b.space_id=? AND b.owner_uid=?
+		    AND b.status='active' AND b.bot_uid!=''`,
+		daemonID, spaceID, ownerUID,
 	).Load(&rows)
 	if err != nil {
 		return nil, err
@@ -333,4 +303,13 @@ func (d *runtimeDB) listActiveBotsForDaemon(daemonID string) ([]struct {
 		out[i].WorkspaceID = r.WorkspaceID
 	}
 	return out, nil
+}
+
+// loadProviders 读取 runtime_provider 全表，供 providerRegistry 刷新快照。
+func (d *runtimeDB) loadProviders() ([]providerDef, error) {
+	var rows []providerDef
+	_, err := d.session.SelectBySql(
+		"SELECT name, display_name, binary_name, upgrade_timeout_sec, status FROM runtime_provider ORDER BY sort_order ASC, name ASC",
+	).Load(&rows)
+	return rows, err
 }

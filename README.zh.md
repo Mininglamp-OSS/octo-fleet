@@ -74,7 +74,6 @@ Fleet 配置从 `configs/fleet.yaml` 读，加上以下环境变量覆盖：
 
 | 环境变量 | 用途 | 默认 |
 |---|---|---|
-| `OCTO_MATTER_URL` | matter 服务的 base URL（bot feed proxy 用） | 未设 → bot feed 返回空 |
 | `NOTIFY_INTERNAL_TOKEN` | 兼容老 `/v1/internal/*` 回调的 X-Internal-Token | 未设 → 这些路由 401 |
 
 完整字段（`addr` / `db.mysqlAddr` / `db.redisAddr` / `external.baseURL` / `auth.serverJwksURL`）见 `configs/fleet.yaml`。
@@ -124,13 +123,14 @@ Fleet 配置从 `configs/fleet.yaml` 读，加上以下环境变量覆盖：
 - `POST /v1/daemon/register`
 - `POST /v1/daemon/heartbeat` — 返回 `pending_command`（bot.provision）+ `managed_bots`
 - `POST /v1/daemon/deregister`
-- `POST /v1/daemon/{ping,upgrade,bots,bot-tasks}/...` 各类 ack
+- `POST /v1/daemon/{upgrade,bots,bot-tasks}/...` 各类 ack
+  (`/v1/daemon/ping/:id` 仅保留为已废弃的 no-op 兼容 shim —— Server Ping 功能已移除,不属于受支持 API)
 
 ### Web 端点（JWT scope=web）
 - `GET  /v1/runtimes` — 列空间内注册的 runtime
 - `POST /v1/runtimes/bots` — 建 bot（draft 状态）
 - `POST /v1/runtimes/bots/:id/mint` — patch server mint 出来的 `bot_uid`，触发 provision
-- `GET  /v1/runtimes/bots[/:id[/feed]]` — 各种读 API
+- `GET  /v1/runtimes/bots[/:id]` — 各种读 API（bot feed 已迁到 matter: `GET /matter/api/v1/bots/:bot_uid/feed`）
 - `DELETE /v1/runtimes/bots/:id` — 归档
 
 ## 🚧 PoC 状态
@@ -139,7 +139,6 @@ Fleet 配置从 `configs/fleet.yaml` 读，加上以下环境变量覆盖：
 
 - [ ] `internal/auth` 和 bot 创建链路的单测
 - [ ] 清理 legacy `bot_task.go`（PR-B.3 已废弃，代码留作 rollback）
-- [ ] 去掉 fleet→matter 的 bot feed proxy，改成浏览器直接调 matter
 - [ ] 接入 CI lint + golangci-lint
 
 ## 📜 协议

@@ -5,27 +5,29 @@ import (
 )
 
 type agentRuntimeModel struct {
-	SpaceID     string
-	DaemonID    string
-	Name        string
-	Provider    string
-	RuntimeMode string
-	Status      string
-	Version     string
-	DeviceName  string
-	DeviceInfo  string
-	Metadata    string
-	OwnerUID    string
-	LastSeenAt  db.Time
+	SpaceID             string
+	DaemonID            string
+	Name                string
+	Provider            string
+	RuntimeMode         string
+	Status              string
+	Version             string
+	DeviceName          string
+	DeviceInfo          string
+	Metadata            string
+	OwnerUID            string
+	HeartbeatIntervalMs int64 // 0 = unset, sweeper falls back to default
+	LastSeenAt          db.Time
 	db.BaseModel
 }
 
 type registerReq struct {
-	DaemonID   string       `json:"daemon_id"`
-	DeviceName string       `json:"device_name"`
-	DeviceInfo string       `json:"device_info"`
-	CLIVersion string       `json:"cli_version"`
-	Runtimes   []runtimeReq `json:"runtimes"`
+	DaemonID            string       `json:"daemon_id"`
+	DeviceName          string       `json:"device_name"`
+	DeviceInfo          string       `json:"device_info"`
+	CLIVersion          string       `json:"cli_version"`
+	HeartbeatIntervalMs int64        `json:"heartbeat_interval_ms,omitempty"` // daemon-reported, 0 = unset
+	Runtimes            []runtimeReq `json:"runtimes"`
 }
 
 type runtimeReq struct {
@@ -81,11 +83,6 @@ type registeredRuntimeResp struct {
 	Provider string `json:"provider"`
 }
 
-type pingInitReq struct {
-	DaemonID string `json:"daemon_id"`
-	SpaceID  string `json:"space_id"`
-}
-
 type upgradeInitReq struct {
 	DaemonID  string `json:"daemon_id"`
 	SpaceID   string `json:"space_id"`
@@ -125,9 +122,9 @@ type upgradeTask struct {
 }
 
 type releaseMetaJSON struct {
-	Tag       string              `json:"tag"`
-	Assets    []releaseAssetJSON  `json:"assets"`
-	Checksums map[string]string   `json:"checksums"`
+	Tag       string             `json:"tag"`
+	Assets    []releaseAssetJSON `json:"assets"`
+	Checksums map[string]string  `json:"checksums"`
 }
 
 type releaseAssetJSON struct {
@@ -137,18 +134,4 @@ type releaseAssetJSON struct {
 	OS   string `json:"os"`
 	Arch string `json:"arch"`
 	Kind string `json:"kind"`
-}
-
-type pingResultReq struct {
-	DaemonTS int64 `json:"daemon_ts"`
-}
-
-type pingEntry struct {
-	ID       string `db:"id"`
-	SpaceID  string `db:"space_id"`
-	DaemonID string `db:"daemon_id"`
-	ServerTS int64  `db:"server_ts"`
-	DaemonTS int64  `db:"daemon_ts"`
-	RTT      int64  `db:"rtt_ms"`
-	Status   string `db:"status"`
 }
