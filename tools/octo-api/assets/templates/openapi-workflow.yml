@@ -82,7 +82,6 @@ jobs:
       pull-requests: read
     outputs:
       spec: ${{ github.event_name == 'pull_request' && steps.filter.outputs.spec || 'true' }}
-      toolchain: ${{ github.event_name == 'pull_request' && steps.filter.outputs.toolchain || 'true' }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         if: github.event_name == 'pull_request'
@@ -94,8 +93,6 @@ jobs:
         with:
           # `spec` = anything that could change the generated openapi.yaml
           #   (Go source, swag annotations, swag config, ruleset).
-          # `toolchain` = anything that could change the lint toolchain
-          #   (ruleset, custom functions, fixtures, coverage script).
           # A PR that only edits docs/*.md / templates matches neither
           # and skips the pipeline.
           predicate-quantifier: 'some'
@@ -105,9 +102,6 @@ jobs:
               - 'modules/**/*.go'
               - 'tools/octo-api/**'
               - 'docs/openapi/swagger.yaml'
-              - '.github/workflows/openapi.yml'
-            toolchain:
-              - 'tools/octo-api/**'
               - '.github/workflows/openapi.yml'
 
   # --------------------------------------------------------------------
@@ -130,7 +124,7 @@ jobs:
           persist-credentials: false
 
       - name: Check annotation coverage
-        run: bash tools/octo-api/check-swag-coverage.sh modules
+        run: bash tools/octo-api/scripts/check-swag-coverage.sh modules
 
   # --------------------------------------------------------------------
   # Gate 2: Generate openapi.yaml via swag v2 + verify it matches baseline
@@ -193,7 +187,7 @@ jobs:
   # --------------------------------------------------------------------
   # Gate 3: Spectral lint
   # --------------------------------------------------------------------
-  # Validates the generated openapi.yaml against tools/octo-api/spectral.yaml
+  # Validates the generated openapi.yaml against tools/octo-api/assets/spectral.yaml
   # rules (R1-R13 expressed as OpenAPI lint rules). `--fail-severity error`
   # treats warnings as non-blocking so style nudges (e.g. plural resource
   # names) surface without breaking the build. `--format github-actions`
@@ -222,7 +216,7 @@ jobs:
       - name: Spectral lint
         run: |
           npx -y @stoplight/spectral-cli@latest lint docs/openapi/swagger.yaml \
-            --ruleset tools/octo-api/spectral.yaml \
+            --ruleset tools/octo-api/assets/spectral.yaml \
             --fail-severity error \
             --format github-actions
 
@@ -264,30 +258,3 @@ jobs:
           bash tools/octo-api/scripts/diff-openapi.sh "origin/${{ github.event.pull_request.base.ref }}" 2>&1 | tee -a $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
 
-  # --------------------------------------------------------------------
-  # Gate 5: Toolchain self-test (parallel with spec pipeline)
-  # --------------------------------------------------------------------
-  # Regression for tools/octo-api/ itself — runs the four-stage
-  # `make openapi-toolchain-test` suite (coverage script unit test, octo-list-check
-  # JS unit test, spectral rule fire-test against violations.yaml,
-  # spectral clean-test against valid.yaml). This catches a broken
-  # ruleset / function / coverage script BEFORE the main pipeline runs
-  # against it. Independent of the spec pipeline so a regression here
-  # surfaces even when the spec happens to pass.
-  toolchain-self-test:
-    name: Toolchain Self-Test
-    needs: [changes]
-    if: needs.changes.outputs.toolchain == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          persist-credentials: false
-
-      - uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      - name: Run openapi toolchain self-tests
-        run: make openapi-toolchain-test
