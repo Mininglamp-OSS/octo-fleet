@@ -360,7 +360,7 @@ func (rt *Runtime) createBot(c *wkhttp.Context) {
 
 	// FLEET MIGRATION: minting now happens out-of-band — the web client
 	// is expected to POST octo-server /v1/bot/mint, receive {bot_uid},
-	// then PATCH /v1/runtimes/bots/:id/mint here to set the credentials
+	// then POST /v1/bots/{bot_id}/mint here to set the credentials
 	// and trigger bot.provision. This row stays in `draft` status until
 	// that patch arrives.
 	_ = generateBotToken // helper retained for legacy callers
@@ -369,7 +369,7 @@ func (rt *Runtime) createBot(c *wkhttp.Context) {
 	ResponseCreated(c, toBotResp(row))
 }
 
-// patchBotMintReq is the body of PATCH /v1/runtimes/bots/:id/mint.
+// patchBotMintReq is the body of POST /v1/bots/{bot_id}/mint.
 // Web supplies bot_uid (from server) — bot_token is fetched by daemon
 // directly from server, NOT passed through here, so fleet never stores
 // the token.
@@ -377,12 +377,12 @@ type patchBotMintReq struct {
 	BotUID string `json:"bot_uid"`
 }
 
-// PATCH /v1/runtimes/bots/:id/mint
+// POST /v1/bots/{bot_id}/mint
 //
 // Web caller flow:
-//  1. POST /v1/runtimes/bots       → fleet inserts draft row, returns id
+//  1. POST /v1/bots                → fleet inserts draft row, returns id
 //  2. POST /v1/bot/mint (server)   → server mints IM bot, returns bot_uid
-//  3. PATCH /v1/runtimes/bots/:id/mint {bot_uid} → fleet promotes row
+//  3. POST /v1/bots/{bot_id}/mint {bot_uid} → fleet promotes row
 //     to bot_minted (openclaw) or active (inert), queues bot.provision
 //     for the daemon to claim on its next heartbeat.
 //
@@ -458,7 +458,7 @@ func (rt *Runtime) patchBotMint(c *wkhttp.Context) {
 
 	// 决策三 SSE 反向派发 (Phase A 双跑): bot 进 bot_minted 状态后, 推
 	// bot_provision wake-up event 给目标 runtime, daemon 收到后走
-	// GET /v1/daemon/bot-provisions/:id 单独 fetch full payload (含 bot_token).
+	// GET /v1/bots/{bot_id}/provision 单独 fetch full payload (含 bot_token).
 	// A3 决策: token 不进 SSE stream / 不进 event_log. heartbeat
 	// claimPendingBotProvision 仍兜底.
 	if nextStatus == botStatusBotMinted && row.RuntimeID > 0 {

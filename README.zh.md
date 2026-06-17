@@ -120,18 +120,27 @@ Fleet 配置从 `configs/fleet.yaml` 读，加上以下环境变量覆盖：
 ## 🔌 HTTP API
 
 ### Daemon 端点（JWT scope=daemon）
-- `POST /v1/daemon/register`
-- `POST /v1/daemon/heartbeat` — 返回 `pending_command`（bot.provision）+ `managed_bots`
-- `POST /v1/daemon/deregister`
-- `POST /v1/daemon/{upgrade,bots,bot-tasks}/...` 各类 ack
-  (`/v1/daemon/ping/:id` 仅保留为已废弃的 no-op 兼容 shim —— Server Ping 功能已移除,不属于受支持 API)
+- `POST   /v1/runtimes` — 注册
+- `POST   /v1/runtimes/{runtime_id}/heartbeat` — 心跳;返回待处理升级任务 / bot.provision 命令 + `managed_bots`
+- `POST   /v1/runtimes/_deregister` — 注销
+- `GET    /v1/runtimes/{runtime_id}/events` — SSE 反向派发流
+- `GET    /v1/bots/{bot_id}/provision` — 拉取完整 bot.provision payload（含 `bot_token`）
+- `POST   /v1/bots/{bot_id}/ack` — ack 一个 provision 命令
+- `GET    /v1/providers` — 列出 active agent provider
+- `POST   /v1/upgrades/{task_id}/report` — 上报升级任务结果
 
 ### Web 端点（JWT scope=web）
-- `GET  /v1/runtimes` — 列空间内注册的 runtime
-- `POST /v1/runtimes/bots` — 建 bot（draft 状态）
-- `POST /v1/runtimes/bots/:id/mint` — patch server mint 出来的 `bot_uid`，触发 provision
-- `GET  /v1/runtimes/bots[/:id]` — 各种读 API（bot feed 已迁到 matter: `GET /matter/api/v1/bots/:bot_uid/feed`）
-- `DELETE /v1/runtimes/bots/:id` — 归档
+- `GET    /v1/runtimes` — 列空间内注册的 runtime
+- `DELETE /v1/runtimes/{runtime_id}` — 移除一个 runtime
+- `POST   /v1/bots` — 建 bot（draft 状态）
+- `POST   /v1/bots/{bot_id}/mint` — patch server mint 出来的 `bot_uid`，触发 provision
+- `GET    /v1/bots` · `GET /v1/bots/{bot_id}` — 列表 / 读取（bot feed 已迁到 matter: `GET /matter/api/v1/bots/:bot_uid/feed`）
+- `DELETE /v1/bots/{bot_id}` — 归档
+- `POST   /v1/upgrades` — 发起升级任务
+- `GET    /v1/upgrades/{task_id}` — 查询升级任务状态
+
+### Admin 端点（X-Runtime-Admin-Token）
+- `POST   /v1/runtime_latest_versions` — upsert 组件最新版本 + release 元数据
 
 ## 🚧 PoC 状态
 

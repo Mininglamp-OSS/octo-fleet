@@ -21,7 +21,7 @@ import (
 // 的拉模式, 把反向派发改成 SSE 主动推 (延迟 5-7s → <500ms).
 //
 // 架构 (v6 plan §3.4):
-//   - GET /v1/daemon/events?runtime_id=N
+//   - GET /v1/runtimes/{runtime_id}/events
 //   - api_key Bearer 走 daemon authMW (复用决策二)
 //   - A7 ownership SQL gate: SELECT 1 FROM agent_runtime WHERE id=? AND owner_uid=? AND space_id=?
 //     防 daemon A 持自己 api_key 传 runtime_id=daemon-B's → cross-daemon event leak (D1 lesson)
@@ -139,7 +139,7 @@ func (h *sseHub) publish(runtimeID int64, ev eventEnvelope) {
 	}
 }
 
-// GET /v1/daemon/events?runtime_id=N
+// GET /v1/runtimes/{runtime_id}/events
 //
 // 长连接 handler. 流程:
 //  1. authMW 已注入 (uid, space_id)
@@ -373,7 +373,7 @@ func (rt *Runtime) dispatchUpgrade(runtimeID int64, spaceID, ownerUID string, ta
 }
 
 // dispatchBotProvision: A3 决策 — payload 只含 command_id, 不含 bot_token.
-// daemon 收 wake-up 后另起 HTTP GET /v1/daemon/bot-provisions/:command_id
+// daemon 收 wake-up 后另起 HTTP GET /v1/bots/{bot_id}/provision
 // 单独 fetch full payload, secret 永不进 SSE stream / event_log.
 func (rt *Runtime) dispatchBotProvision(runtimeID int64, spaceID, ownerUID, commandID string) {
 	payload, err := json.Marshal(map[string]any{"command_id": commandID})

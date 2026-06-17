@@ -33,7 +33,7 @@ func TestSSERegression_OwnershipGate(t *testing.T) {
 
 // A3 secret-not-in-stream: dispatchBotProvision payload 只能含 command_id,
 // 不能含 bot_token / claim_token / workspace_id 等 secret/敏感字段.
-// daemon 端走 GET /v1/daemon/bot-provisions/:id 单独 fetch.
+// daemon 端走 GET /v1/bots/{bot_id}/provision 单独 fetch.
 func TestSSERegression_BotProvisionPayloadHasNoSecret(t *testing.T) {
 	body := extractFuncBody(t, mustReadSource(t, "sse.go"), "dispatchBotProvision")
 	forbidden := []string{"bot_token", "claim_token", "workspace_id", "BotToken", "ClaimToken", "WorkspaceID"}
