@@ -77,8 +77,8 @@ func (rt *Runtime) upgradeInit(c *wkhttp.Context) {
 	switch {
 	case component == componentDaemon:
 		rt.createDaemonUpgradeTask(c, loginUID, &req, &daemon)
-	case component == componentPlugin:
-		rt.createPluginUpgradeTask(c, loginUID, &req, &daemon)
+	case isPluginComponent(component):
+		rt.createPluginUpgradeTask(c, loginUID, &req, &daemon, component)
 	case rt.providers.IsActiveKind(component):
 		rt.createComponentUpgradeTask(c, loginUID, &req, &daemon, component)
 	default:
@@ -248,13 +248,13 @@ func (rt *Runtime) createDaemonUpgradeTask(c *wkhttp.Context, loginUID string, r
 }
 
 // octo 插件升级
-func (rt *Runtime) createPluginUpgradeTask(c *wkhttp.Context, loginUID string, req *upgradeInitReq, daemon *agentRuntimeModel) {
+func (rt *Runtime) createPluginUpgradeTask(c *wkhttp.Context, loginUID string, req *upgradeInitReq, daemon *agentRuntimeModel, component string) {
 	if req.RuntimeID == 0 {
 		c.ResponseError(errors.New("runtime_id is required for plugin upgrade"))
 		return
 	}
 
-	// 查 runtime（provider=openclaw + 归属 loginUID + 同 daemon_id）
+	// 查 runtime（归属 loginUID + 同 daemon_id）
 	var runtime agentRuntimeModel
 	_, err := rt.db.session.Select("*").From("agent_runtime").
 		Where("id=? AND space_id=? AND daemon_id=? AND owner_uid=?",
@@ -264,8 +264,9 @@ func (rt *Runtime) createPluginUpgradeTask(c *wkhttp.Context, loginUID string, r
 		c.ResponseErrorWithStatus(errors.New("runtime not found or not owned by you"), 403)
 		return
 	}
-	if runtime.Provider != "openclaw" {
-		c.ResponseError(errors.New("plugin upgrade only supports openclaw runtime"))
+	// 组件必须是该 provider 的 octo 适配插件（octo↔openclaw / cc-octo↔claude）
+	if !validPluginForProvider(component, runtime.Provider) {
+		c.ResponseError(fmt.Errorf("%s is not the plugin component for %s runtime", component, runtime.Provider))
 		return
 	}
 
@@ -279,13 +280,13 @@ func (rt *Runtime) createPluginUpgradeTask(c *wkhttp.Context, loginUID string, r
 	json.Unmarshal([]byte(runtime.Metadata), &metaJSON)
 	fromVersion := ""
 	for _, p := range metaJSON.Plugins {
-		if p.Name == componentPlugin {
+		if p.Name == component {
 			fromVersion = p.Version
 			break
 		}
 	}
 	if fromVersion == "" {
-		c.ResponseError(fmt.Errorf("%s not installed on this runtime", componentPlugin))
+		c.ResponseError(fmt.Errorf("%s not installed on this runtime", component))
 		return
 	}
 
@@ -295,10 +296,10 @@ func (rt *Runtime) createPluginUpgradeTask(c *wkhttp.Context, loginUID string, r
 	}
 	_, err = rt.db.session.SelectBySql(
 		"SELECT latest_version FROM runtime_latest_version WHERE component=?",
-		componentPlugin,
+		component,
 	).Load(&versionRow)
 	if err != nil || versionRow.LatestVersion == "" {
-		c.ResponseError(errors.New("no latest version available for " + componentPlugin))
+		c.ResponseError(errors.New("no latest version available for " + component))
 		return
 	}
 
@@ -321,7 +322,7 @@ func (rt *Runtime) createPluginUpgradeTask(c *wkhttp.Context, loginUID string, r
 		SpaceID:     req.SpaceID,
 		DaemonID:    req.DaemonID,
 		OwnerUID:    loginUID,
-		Component:   componentPlugin,
+		Component:   component,
 		FromVersion: fromVersion,
 		ToVersion:   versionRow.LatestVersion,
 		DownloadURL: "",
@@ -688,16 +689,16 @@ func (d *runtimeDB) timeoutStaleUpgrades(activeProviders map[string]int) {
 		 AND updated_at < DATE_SUB(NOW(), INTERVAL ? SECOND)`,
 		componentDaemon, daemonUpgradeTimeoutSec,
 	).Exec()
-	// plugin: 600s，精简 3 态机
+	// plugin: 600s，精简 3 态机(octo + cc-octo 同属插件桶)
 	d.session.UpdateBySql(
 		`UPDATE runtime_upgrade_task SET status='timeout', error_msg='upgrade timed out', updated_at=NOW()
-		 WHERE component=?
+		 WHERE component IN (?, ?)
 		 AND status IN ('pending','dispatched','installing')
 		 AND updated_at < DATE_SUB(NOW(), INTERVAL ? SECOND)`,
-		componentPlugin, pluginUpgradeTimeoutSec,
+		componentPlugin, componentCcOcto, pluginUpgradeTimeoutSec,
 	).Exec()
 	// active provider 组件：各自 timeout，3 态机
-	known := []interface{}{componentDaemon, componentPlugin}
+	known := []interface{}{componentDaemon, componentPlugin, componentCcOcto}
 	for component, timeoutSec := range activeProviders {
 		known = append(known, component)
 		d.session.UpdateBySql(

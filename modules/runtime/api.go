@@ -291,8 +291,8 @@ func (rt *Runtime) upsertLatestVersionAdmin(c *wkhttp.Context) {
 		c.ResponseError(errors.New("invalid request body"))
 		return
 	}
-	// component 白名单:daemon / 插件 / active provider
-	valid := req.Component == componentDaemon || req.Component == componentPlugin || rt.providers.IsActiveKind(req.Component)
+	// component 白名单:daemon / 插件(octo + cc-octo) / active provider
+	valid := req.Component == componentDaemon || isPluginComponent(req.Component) || rt.providers.IsActiveKind(req.Component)
 	if !valid {
 		c.ResponseError(fmt.Errorf("component %q not in registry/whitelist", req.Component))
 		return
@@ -485,24 +485,10 @@ func (rt *Runtime) list(c *wkhttp.Context) {
 				}
 			}
 
-			if r.Provider == "openclaw" && r.Metadata != "" {
-				if pluginLatest, ok := latestVersions["octo"]; ok && pluginLatest != "" {
-					var meta map[string]interface{}
-					if json.Unmarshal([]byte(r.Metadata), &meta) == nil {
-						plugins, _ := meta["plugins"].([]interface{})
-						for _, p := range plugins {
-							pm, _ := p.(map[string]interface{})
-							if pm["name"] == "octo" {
-								pv, _ := pm["version"].(string)
-								if pv != "" && isVersionOlder(pv, pluginLatest) {
-									hint["plugin_has_update"] = true
-									hint["plugin_latest_version"] = pluginLatest
-									hasHint = true
-								}
-							}
-						}
-					}
-				}
+			if pluginHas, pluginLatest := computePluginHint(r.Provider, r.Metadata, latestVersions); pluginHas {
+				hint["plugin_has_update"] = true
+				hint["plugin_latest_version"] = pluginLatest
+				hasHint = true
 			}
 
 			if hasHint {
