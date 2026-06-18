@@ -301,7 +301,10 @@ func (rt *Runtime) createPluginUpgradeTask(c *wkhttp.Context, loginUID string, r
 			break
 		}
 	}
-	if fromVersion == "" {
+	// fromVersion == "" 表示该插件尚未安装。仅 openclaw 的 octo 适配插件(componentPlugin)
+	// 支持一键安装(install 到 latest);cc-octo 等其它插件未安装仍拒绝 —— 其安装需用户
+	// 提供 LLM 网关/key 等额外配置,另行支持。
+	if fromVersion == "" && component != componentPlugin {
 		responseError(c, errcode.Validation)
 		return
 	}
