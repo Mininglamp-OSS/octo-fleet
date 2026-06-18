@@ -132,7 +132,7 @@ and the spec at
 - `POST   /v1/runtimes/{runtime_id}/heartbeat` — liveness; returns pending upgrade task / bot.provision command + `managed_bots`
 - `POST   /v1/runtimes/_deregister` — deregister
 - `GET    /v1/runtimes/{runtime_id}/events` — SSE reverse-dispatch stream
-- `GET    /v1/bots/{bot_id}/provision` — fetch full bot.provision payload (incl. `bot_token`)
+- `GET    /v1/bots/{bot_id}/provision` — fetch the bot.provision payload (workspace_id, bot_uid, claim_token; **never** `bot_token`)
 - `POST   /v1/bots/{bot_id}/ack` — ack a provision command
 - `GET    /v1/providers` — list active agent providers
 - `POST   /v1/upgrades/{task_id}/report` — report upgrade task result

@@ -458,7 +458,8 @@ func (rt *Runtime) patchBotMint(c *wkhttp.Context) {
 
 	// 决策三 SSE 反向派发 (Phase A 双跑): bot 进 bot_minted 状态后, 推
 	// bot_provision wake-up event 给目标 runtime, daemon 收到后走
-	// GET /v1/bots/{bot_id}/provision 单独 fetch full payload (含 bot_token).
+	// GET /v1/bots/{bot_id}/provision 单独 fetch full payload
+	// (workspace_id/bot_uid/claim_token, 永不含 bot_token).
 	// A3 决策: token 不进 SSE stream / 不进 event_log. heartbeat
 	// claimPendingBotProvision 仍兜底.
 	if nextStatus == botStatusBotMinted && row.RuntimeID > 0 {

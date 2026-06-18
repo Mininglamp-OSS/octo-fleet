@@ -124,7 +124,7 @@ Fleet 配置从 `configs/fleet.yaml` 读，加上以下环境变量覆盖：
 - `POST   /v1/runtimes/{runtime_id}/heartbeat` — 心跳;返回待处理升级任务 / bot.provision 命令 + `managed_bots`
 - `POST   /v1/runtimes/_deregister` — 注销
 - `GET    /v1/runtimes/{runtime_id}/events` — SSE 反向派发流
-- `GET    /v1/bots/{bot_id}/provision` — 拉取完整 bot.provision payload（含 `bot_token`）
+- `GET    /v1/bots/{bot_id}/provision` — 拉取 bot.provision payload（workspace_id / bot_uid / claim_token；**永不含** `bot_token`）
 - `POST   /v1/bots/{bot_id}/ack` — ack 一个 provision 命令
 - `GET    /v1/providers` — 列出 active agent provider
 - `POST   /v1/upgrades/{task_id}/report` — 上报升级任务结果
