@@ -65,6 +65,14 @@ func loadConfigFromFile(cfgFile string) *viper.Viper {
 // @securityDefinitions.apikey Bearer
 // @in              header
 // @name            Authorization
+
+// @securityDefinitions.apikey SessionToken
+// @in              header
+// @name            token
+
+// @securityDefinitions.apikey AdminToken
+// @in              header
+// @name            X-Runtime-Admin-Token
 func main() {
 	var cfgFile string
 	flag.StringVar(&cfgFile, "config", "configs/fleet.yaml", "config file")

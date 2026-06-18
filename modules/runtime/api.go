@@ -280,7 +280,7 @@ type upsertLatestVersionReq struct {
 // @ID           runtime_latest_version.upsert
 // @Accept       json
 // @Produce      json
-// @Param        X-Runtime-Admin-Token header string true "Admin token"
+// @Security     AdminToken
 // @Param        body body upsertLatestVersionReq true "Component version + optional release metadata"
 // @Success      200 {object} envelope.Data[envelope.EmptyResp] "upserted"
 // @Failure      400 {object} envelope.Error "VALIDATION_ERROR"
@@ -469,7 +469,7 @@ func (rt *Runtime) deregister(c *wkhttp.Context) {
 // @ID           runtime.list
 // @Accept       json
 // @Produce      json
-// @Security     Bearer
+// @Security     SessionToken
 // @Param        space_id query string true "Space ID"
 // @Success      200 {object} envelope.Data[runtimesView] "runtimes + hints"
 // @Failure      400 {object} envelope.Error "VALIDATION_ERROR"
@@ -623,7 +623,7 @@ func (rt *Runtime) list(c *wkhttp.Context) {
 // @ID           runtime.delete
 // @Accept       json
 // @Produce      json
-// @Security     Bearer
+// @Security     SessionToken
 // @Param        runtime_id path int true "Runtime ID"
 // @Success      200 {object} envelope.Data[envelope.EmptyResp] "deleted"
 // @Failure      400 {object} envelope.Error "VALIDATION_ERROR"

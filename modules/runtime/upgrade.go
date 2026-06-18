@@ -34,7 +34,7 @@ const (
 // @ID           upgrade.create
 // @Accept       json
 // @Produce      json
-// @Security     Bearer
+// @Security     SessionToken
 // @Param        body body upgradeInitReq true "Upgrade request (daemon_id, space_id, component, runtime_id)"
 // @Success      201 {object} envelope.Data[upgradeInitResp] "task created"
 // @Failure      400 {object} envelope.Error "VALIDATION_ERROR"
@@ -477,7 +477,7 @@ func (rt *Runtime) insertUpgradeTask(c *wkhttp.Context, args insertTaskArgs) {
 // @ID           upgrade.get
 // @Accept       json
 // @Produce      json
-// @Security     Bearer
+// @Security     SessionToken
 // @Param        task_id path string true "Upgrade task ID"
 // @Success      200 {object} envelope.Data[upgradeGetResp] "task status"
 // @Failure      401 {object} envelope.Error "AUTH_REQUIRED"

@@ -292,7 +292,7 @@ func deriveWorkspaceID(name string) string {
 // @ID           bot.create
 // @Accept       json
 // @Produce      json
-// @Security     Bearer
+// @Security     SessionToken
 // @Param        body body createBotReq true "runtime_id, name, runtime_kind"
 // @Success      201 {object} envelope.Data[botResp] "draft bot"
 // @Failure      400 {object} envelope.Error "VALIDATION_ERROR"
@@ -396,7 +396,7 @@ type patchBotMintReq struct {
 // @ID           bot.mint
 // @Accept       json
 // @Produce      json
-// @Security     Bearer
+// @Security     SessionToken
 // @Param        bot_id path int true "Bot ID"
 // @Param        body body patchBotMintReq true "bot_uid from server mint"
 // @Success      200 {object} envelope.Data[botResp] "minted bot"
@@ -477,7 +477,7 @@ func (rt *Runtime) patchBotMint(c *wkhttp.Context) {
 // @ID           bot.list
 // @Accept       json
 // @Produce      json
-// @Security     Bearer
+// @Security     SessionToken
 // @Param        space_id     query string true  "Space ID"
 // @Param        runtime_kind query string false "Filter by runtime kind"
 // @Param        page         query int    false "Page number, default 1"
@@ -540,7 +540,7 @@ func (rt *Runtime) listBots(c *wkhttp.Context) {
 // @ID           bot.get
 // @Accept       json
 // @Produce      json
-// @Security     Bearer
+// @Security     SessionToken
 // @Param        bot_id path int true "Bot ID"
 // @Success      200 {object} envelope.Data[botResp] "bot"
 // @Failure      401 {object} envelope.Error "AUTH_REQUIRED"
@@ -579,7 +579,7 @@ func (rt *Runtime) getBot(c *wkhttp.Context) {
 // @ID           bot.archive
 // @Accept       json
 // @Produce      json
-// @Security     Bearer
+// @Security     SessionToken
 // @Param        bot_id path int true "Bot ID"
 // @Success      200 {object} envelope.Data[envelope.EmptyResp] "archived"
 // @Failure      401 {object} envelope.Error "AUTH_REQUIRED"

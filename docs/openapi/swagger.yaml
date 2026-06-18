@@ -484,9 +484,17 @@ components:
           type: string
       type: object
   securitySchemes:
+    AdminToken:
+      in: header
+      name: X-Runtime-Admin-Token
+      type: apiKey
     Bearer:
       in: header
       name: Authorization
+      type: apiKey
+    SessionToken:
+      in: header
+      name: token
       type: apiKey
 info:
   contact:
@@ -563,7 +571,7 @@ paths:
                 $ref: '#/components/schemas/envelope.Error'
           description: INTERNAL_ERROR
       security:
-      - Bearer: []
+      - SessionToken: []
       summary: List bots
       tags:
       - bot
@@ -614,7 +622,7 @@ paths:
                 $ref: '#/components/schemas/envelope.Error'
           description: INTERNAL_ERROR
       security:
-      - Bearer: []
+      - SessionToken: []
       summary: Create a bot
       tags:
       - bot
@@ -667,7 +675,7 @@ paths:
                 $ref: '#/components/schemas/envelope.Error'
           description: INTERNAL_ERROR
       security:
-      - Bearer: []
+      - SessionToken: []
       summary: Archive a bot
       tags:
       - bot
@@ -712,7 +720,7 @@ paths:
                 $ref: '#/components/schemas/envelope.Error'
           description: NOT_FOUND
       security:
-      - Bearer: []
+      - SessionToken: []
       summary: Get a bot
       tags:
       - bot
@@ -842,20 +850,26 @@ paths:
                 $ref: '#/components/schemas/envelope.Error'
           description: CONFLICT
       security:
-      - Bearer: []
+      - SessionToken: []
       summary: Mint a bot
       tags:
       - bot
   /bots/{bot_id}/provision:
     get:
       description: Daemon fetches the full bot.provision payload (workspace_id, bot_uid,
-        claim_token; never bot_token) and atomically claims it (bot_minted→dispatched).
+        claim_token; never bot_token) and atomically claims it (bot_minted->dispatched).
         Idempotent while dispatched; 409 once active/archived.
       operationId: bot.provision.get
       parameters:
       - description: Bot ID (== provision command id)
         in: path
         name: bot_id
+        required: true
+        schema:
+          type: integer
+      - description: Caller's runtime ID (ownership-bound)
+        in: query
+        name: runtime_id
         required: true
         schema:
           type: integer
@@ -946,13 +960,6 @@ paths:
         for a component (daemon / plugin / active provider). Authenticated by the
         X-Runtime-Admin-Token header, not a JWT.'
       operationId: runtime_latest_version.upsert
-      parameters:
-      - description: Admin token
-        in: header
-        name: X-Runtime-Admin-Token
-        required: true
-        schema:
-          type: string
       requestBody:
         content:
           application/json:
@@ -989,6 +996,8 @@ paths:
               schema:
                 $ref: '#/components/schemas/envelope.Error'
           description: INTERNAL_ERROR
+      security:
+      - AdminToken: []
       summary: Upsert a component's latest version
       tags:
       - upgrade
@@ -1042,7 +1051,7 @@ paths:
                 $ref: '#/components/schemas/envelope.Error'
           description: INTERNAL_ERROR
       security:
-      - Bearer: []
+      - SessionToken: []
       summary: List runtimes in a space
       tags:
       - runtime
@@ -1203,7 +1212,7 @@ paths:
                 $ref: '#/components/schemas/envelope.Error'
           description: INTERNAL_ERROR
       security:
-      - Bearer: []
+      - SessionToken: []
       summary: Delete a runtime
       tags:
       - runtime
@@ -1344,7 +1353,7 @@ paths:
                 $ref: '#/components/schemas/envelope.Error'
           description: INTERNAL_ERROR
       security:
-      - Bearer: []
+      - SessionToken: []
       summary: Create an upgrade task
       tags:
       - upgrade
@@ -1390,7 +1399,7 @@ paths:
                 $ref: '#/components/schemas/envelope.Error'
           description: NOT_FOUND
       security:
-      - Bearer: []
+      - SessionToken: []
       summary: Get upgrade task status
       tags:
       - upgrade
