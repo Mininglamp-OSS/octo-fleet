@@ -52,7 +52,6 @@ type agentInfo struct {
 	Routes   []string `json:"routes,omitempty"`
 }
 
-
 type deregisterReq struct {
 	RuntimeIDs []int64 `json:"runtime_ids"`
 }
@@ -138,6 +137,13 @@ type releaseAssetJSON struct {
 // registerResp is the POST /runtimes response.
 type registerResp struct {
 	Runtimes []registeredRuntimeResp `json:"runtimes"`
+}
+
+// verifyResp is the POST /runtimes/verify response — the owner + space the
+// daemon's api_key resolved to (echoed from the auth middleware).
+type verifyResp struct {
+	SpaceID  string `json:"space_id"`
+	OwnerUID string `json:"owner_uid"`
 }
 
 // pendingUpgradeCmd is a heartbeat-piggybacked upgrade task for the daemon.
