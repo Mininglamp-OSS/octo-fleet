@@ -45,6 +45,11 @@ components:
         data:
           $ref: '#/components/schemas/runtime.upgradeInitResp'
       type: object
+    envelope.Data-runtime_verifyResp:
+      properties:
+        data:
+          $ref: '#/components/schemas/runtime.verifyResp'
+      type: object
     envelope.EmptyResp:
       type: object
     envelope.Error:
@@ -469,6 +474,13 @@ components:
           type: string
         release_meta:
           $ref: '#/components/schemas/runtime.releaseMetaJSON'
+      type: object
+    runtime.verifyResp:
+      properties:
+        owner_uid:
+          type: string
+        space_id:
+          type: string
       type: object
     runtime.versionHint:
       properties:
@@ -1295,6 +1307,42 @@ paths:
       security:
       - Bearer: []
       summary: Daemon heartbeat
+      tags:
+      - runtime
+  /runtimes/verify:
+    post:
+      description: Validate the daemon's api_key during configuration and return the
+        bound space. No DB write — the auth middleware already verified the key against
+        octo-server; this echoes back the resolved owner + space so the daemon can
+        confirm its setup.
+      operationId: runtime.verify
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Data-runtime_verifyResp'
+          description: verified credentials
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: AUTH_REQUIRED
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: FORBIDDEN
+      security:
+      - Bearer: []
+      summary: Verify daemon credentials
       tags:
       - runtime
   /upgrades:

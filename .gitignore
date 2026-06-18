@@ -3,3 +3,4 @@ fleetdata/
 logs/
 *.log
 .DS_Store
+docs/openapi/index.html

@@ -60,14 +60,15 @@ func (rt *Runtime) Route(r *wkhttp.WKHttp) {
 	// share the /v1 prefix; gin routes by method + sub-path.
 	daemon := r.Group("/v1", auth.Middleware("daemon"))
 	{
-		daemon.POST("/runtimes", rt.register)                          // register/upsert this daemon's runtimes
-		daemon.POST("/runtimes/:runtime_id/heartbeat", rt.heartbeat)   // liveness + pull pending commands
-		daemon.POST("/runtimes/_deregister", rt.deregister)            // batch mark offline
-		daemon.GET("/runtimes/:runtime_id/events", rt.sseEvents)       // per-runtime SSE reverse-dispatch stream
-		daemon.GET("/bots/:bot_id/provision", rt.fetchBotProvision)    // fetch full bot.provision payload
-		daemon.POST("/bots/:bot_id/ack", rt.ackBot)                    // ack provision result
-		daemon.GET("/providers", rt.listProviders)                     // active runtime-provider catalog
-		daemon.POST("/upgrades/:task_id/report", rt.upgradeReport)     // report upgrade progress
+		daemon.POST("/runtimes", rt.register)                        // register/upsert this daemon's runtimes
+		daemon.POST("/runtimes/verify", rt.verify)                   // validate api_key during daemon config + return bound space
+		daemon.POST("/runtimes/:runtime_id/heartbeat", rt.heartbeat) // liveness + pull pending commands
+		daemon.POST("/runtimes/_deregister", rt.deregister)          // batch mark offline
+		daemon.GET("/runtimes/:runtime_id/events", rt.sseEvents)     // per-runtime SSE reverse-dispatch stream
+		daemon.GET("/bots/:bot_id/provision", rt.fetchBotProvision)  // fetch full bot.provision payload
+		daemon.POST("/bots/:bot_id/ack", rt.ackBot)                  // ack provision result
+		daemon.GET("/providers", rt.listProviders)                   // active runtime-provider catalog
+		daemon.POST("/upgrades/:task_id/report", rt.upgradeReport)   // report upgrade progress
 	}
 
 	web := r.Group("/v1", auth.Middleware("web"))
@@ -227,6 +228,24 @@ func (rt *Runtime) register(c *wkhttp.Context) {
 	}
 
 	ResponseData(c, registerResp{Runtimes: registered})
+}
+
+// verify godoc
+// @Summary      Verify daemon credentials
+// @Description  Validate the daemon's api_key during configuration and return the bound space. No DB write — the auth middleware already verified the key against octo-server; this echoes back the resolved owner + space so the daemon can confirm its setup.
+// @Tags         runtime
+// @ID           runtime.verify
+// @Accept       json
+// @Produce      json
+// @Security     Bearer
+// @Success      200 {object} envelope.Data[verifyResp] "verified credentials"
+// @Failure      401 {object} envelope.Error "AUTH_REQUIRED"
+// @Failure      403 {object} envelope.Error "FORBIDDEN"
+// @Router       /runtimes/verify [post]
+func (rt *Runtime) verify(c *wkhttp.Context) {
+	ownerUID := c.MustGet("uid").(string)
+	spaceID := c.MustGet("space_id").(string)
+	ResponseData(c, verifyResp{SpaceID: spaceID, OwnerUID: ownerUID})
 }
 
 type providerInfo struct {
