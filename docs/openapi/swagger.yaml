@@ -1,0 +1,1481 @@
+components:
+  schemas:
+    envelope.Data-envelope_EmptyResp:
+      properties:
+        data:
+          $ref: '#/components/schemas/envelope.EmptyResp'
+      type: object
+    envelope.Data-runtime_botProvisionFetchResponse:
+      properties:
+        data:
+          $ref: '#/components/schemas/runtime.botProvisionFetchResponse'
+      type: object
+    envelope.Data-runtime_botResp:
+      properties:
+        data:
+          $ref: '#/components/schemas/runtime.botResp'
+      type: object
+    envelope.Data-runtime_heartbeatResp:
+      properties:
+        data:
+          $ref: '#/components/schemas/runtime.heartbeatResp'
+      type: object
+    envelope.Data-runtime_providersResp:
+      properties:
+        data:
+          $ref: '#/components/schemas/runtime.providersResp'
+      type: object
+    envelope.Data-runtime_registerResp:
+      properties:
+        data:
+          $ref: '#/components/schemas/runtime.registerResp'
+      type: object
+    envelope.Data-runtime_runtimesView:
+      properties:
+        data:
+          $ref: '#/components/schemas/runtime.runtimesView'
+      type: object
+    envelope.Data-runtime_upgradeGetResp:
+      properties:
+        data:
+          $ref: '#/components/schemas/runtime.upgradeGetResp'
+      type: object
+    envelope.Data-runtime_upgradeInitResp:
+      properties:
+        data:
+          $ref: '#/components/schemas/runtime.upgradeInitResp'
+      type: object
+    envelope.EmptyResp:
+      type: object
+    envelope.Error:
+      properties:
+        error:
+          $ref: '#/components/schemas/envelope.ErrorBody'
+      type: object
+    envelope.ErrorBody:
+      properties:
+        code:
+          type: string
+        details:
+          additionalProperties: {}
+          type: object
+        hint:
+          type: string
+        message:
+          type: string
+      type: object
+    envelope.OffsetList-runtime_botResp:
+      properties:
+        data:
+          items:
+            $ref: '#/components/schemas/runtime.botResp'
+          type: array
+          uniqueItems: false
+        pagination:
+          $ref: '#/components/schemas/envelope.OffsetPagination'
+      type: object
+    envelope.OffsetPagination:
+      properties:
+        page:
+          type: integer
+        page_size:
+          type: integer
+        total:
+          type: integer
+      type: object
+    runtime.ackBotReq:
+      properties:
+        claim_token:
+          type: string
+        error_msg:
+          type: string
+        status:
+          type: string
+      type: object
+    runtime.activeUpgradeItem:
+      properties:
+        component:
+          type: string
+        daemon_id:
+          type: string
+        error_msg:
+          type: string
+        from_version:
+          type: string
+        runtime_id:
+          description: 插件有值，daemon 升级无值
+          type: integer
+        status:
+          type: string
+        task_id:
+          type: string
+        to_version:
+          type: string
+      type: object
+    runtime.agentInfo:
+      properties:
+        bindings:
+          type: integer
+        id:
+          type: string
+        is_default:
+          type: boolean
+        name:
+          type: string
+        routes:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+      type: object
+    runtime.botProvisionCmd:
+      properties:
+        action:
+          type: string
+        bot_uid:
+          type: string
+        claim_token:
+          type: string
+        display_name:
+          type: string
+        id:
+          type: integer
+        runtime_kind:
+          type: string
+        workspace_id:
+          type: string
+      type: object
+    runtime.botProvisionFetchResponse:
+      properties:
+        action:
+          type: string
+        bot_uid:
+          type: string
+        claim_token:
+          type: string
+        display_name:
+          type: string
+        id:
+          type: integer
+        runtime_kind:
+          type: string
+        workspace_id:
+          type: string
+      type: object
+    runtime.botResp:
+      properties:
+        bot_uid:
+          type: string
+        created_at:
+          type: string
+        daemon_id:
+          type: string
+        error_msg:
+          type: string
+        id:
+          type: integer
+        name:
+          type: string
+        owner_uid:
+          type: string
+        runtime_id:
+          type: integer
+        runtime_kind:
+          type: string
+        space_id:
+          type: string
+        status:
+          type: string
+        updated_at:
+          type: string
+        workspace_id:
+          type: string
+      type: object
+    runtime.createBotReq:
+      properties:
+        name:
+          type: string
+        runtime_id:
+          type: integer
+        runtime_kind:
+          type: string
+      type: object
+    runtime.daemonVersionHint:
+      properties:
+        current:
+          type: string
+        has_update:
+          type: boolean
+        latest_version:
+          type: string
+      type: object
+    runtime.deregisterReq:
+      properties:
+        runtime_ids:
+          items:
+            type: integer
+          type: array
+          uniqueItems: false
+      type: object
+    runtime.heartbeatResp:
+      properties:
+        managed_bots:
+          items:
+            $ref: '#/components/schemas/runtime.managedBot'
+          type: array
+          uniqueItems: false
+        pending_command:
+          $ref: '#/components/schemas/runtime.botProvisionCmd'
+        pending_upgrade:
+          $ref: '#/components/schemas/runtime.pendingUpgradeCmd'
+      type: object
+    runtime.managedBot:
+      properties:
+        bot_uid:
+          type: string
+        workspace_id:
+          type: string
+      type: object
+    runtime.patchBotMintReq:
+      properties:
+        bot_uid:
+          type: string
+      type: object
+    runtime.pendingUpgradeCmd:
+      properties:
+        checksum:
+          type: string
+        component:
+          type: string
+        download_url:
+          type: string
+        metadata:
+          type: string
+        target_version:
+          type: string
+        task_id:
+          type: string
+      type: object
+    runtime.pluginInfo:
+      properties:
+        name:
+          type: string
+        version:
+          type: string
+      type: object
+    runtime.providerInfo:
+      properties:
+        binary_name:
+          type: string
+        display_name:
+          type: string
+        name:
+          type: string
+        upgrade_timeout_sec:
+          type: integer
+      type: object
+    runtime.providersResp:
+      properties:
+        providers:
+          items:
+            $ref: '#/components/schemas/runtime.providerInfo'
+          type: array
+          uniqueItems: false
+      type: object
+    runtime.registerReq:
+      properties:
+        cli_version:
+          type: string
+        daemon_id:
+          type: string
+        device_info:
+          type: string
+        device_name:
+          type: string
+        heartbeat_interval_ms:
+          description: daemon-reported, 0 = unset
+          type: integer
+        runtimes:
+          items:
+            $ref: '#/components/schemas/runtime.runtimeReq'
+          type: array
+          uniqueItems: false
+      type: object
+    runtime.registerResp:
+      properties:
+        runtimes:
+          items:
+            $ref: '#/components/schemas/runtime.registeredRuntimeResp'
+          type: array
+          uniqueItems: false
+      type: object
+    runtime.registeredRuntimeResp:
+      properties:
+        id:
+          type: integer
+        provider:
+          type: string
+      type: object
+    runtime.releaseAssetJSON:
+      properties:
+        arch:
+          type: string
+        kind:
+          type: string
+        name:
+          type: string
+        os:
+          type: string
+        size:
+          type: integer
+        url:
+          type: string
+      type: object
+    runtime.releaseMetaJSON:
+      description: 可选:daemon 自升级所需的 assets+checksums(省略=不更新)
+      properties:
+        assets:
+          items:
+            $ref: '#/components/schemas/runtime.releaseAssetJSON'
+          type: array
+          uniqueItems: false
+        checksums:
+          additionalProperties:
+            type: string
+          type: object
+        tag:
+          type: string
+      type: object
+    runtime.runtimeReq:
+      properties:
+        agents:
+          items:
+            $ref: '#/components/schemas/runtime.agentInfo'
+          type: array
+          uniqueItems: false
+        name:
+          type: string
+        plugins:
+          items:
+            $ref: '#/components/schemas/runtime.pluginInfo'
+          type: array
+          uniqueItems: false
+        status:
+          type: string
+        type:
+          type: string
+        version:
+          type: string
+      type: object
+    runtime.runtimeResp:
+      properties:
+        created_at:
+          type: string
+        daemon_id:
+          type: string
+        device_info:
+          type: string
+        device_name:
+          type: string
+        id:
+          type: integer
+        last_seen_at:
+          type: string
+        metadata:
+          type: string
+        name:
+          type: string
+        owner_uid:
+          type: string
+        provider:
+          type: string
+        runtime_mode:
+          type: string
+        space_id:
+          type: string
+        status:
+          type: string
+        updated_at:
+          type: string
+        version:
+          type: string
+      type: object
+    runtime.runtimesView:
+      properties:
+        active_upgrades:
+          items:
+            $ref: '#/components/schemas/runtime.activeUpgradeItem'
+          type: array
+          uniqueItems: false
+        daemon_version_hints:
+          additionalProperties:
+            $ref: '#/components/schemas/runtime.daemonVersionHint'
+          type: object
+        runtimes:
+          items:
+            $ref: '#/components/schemas/runtime.runtimeResp'
+          type: array
+          uniqueItems: false
+        version_hints:
+          additionalProperties:
+            $ref: '#/components/schemas/runtime.versionHint'
+          type: object
+      type: object
+    runtime.upgradeGetResp:
+      properties:
+        component:
+          type: string
+        error_msg:
+          type: string
+        from_version:
+          type: string
+        id:
+          type: string
+        status:
+          type: string
+        to_version:
+          type: string
+      type: object
+    runtime.upgradeInitReq:
+      properties:
+        component:
+          description: 默认 "octo-daemon"；插件填 "octo"
+          type: string
+        daemon_id:
+          type: string
+        runtime_id:
+          description: 插件分支必填：对应 openclaw runtime 的 id
+          type: integer
+        space_id:
+          type: string
+      type: object
+    runtime.upgradeInitResp:
+      properties:
+        task_id:
+          type: string
+      type: object
+    runtime.upgradeReportReq:
+      properties:
+        error:
+          type: string
+        status:
+          type: string
+      type: object
+    runtime.upsertLatestVersionReq:
+      properties:
+        component:
+          type: string
+        latest_version:
+          type: string
+        release_meta:
+          $ref: '#/components/schemas/runtime.releaseMetaJSON'
+      type: object
+    runtime.versionHint:
+      properties:
+        has_plugin_update:
+          type: boolean
+        has_update:
+          type: boolean
+        latest_version:
+          type: string
+        plugin_latest_version:
+          type: string
+      type: object
+  securitySchemes:
+    AdminToken:
+      in: header
+      name: X-Runtime-Admin-Token
+      type: apiKey
+    Bearer:
+      in: header
+      name: Authorization
+      type: apiKey
+    SessionToken:
+      in: header
+      name: token
+      type: apiKey
+info:
+  contact:
+    name: OCTO Team (Mininglamp-OSS)
+    url: https://github.com/Mininglamp-OSS/octo-fleet
+  description: Runtime & bot orchestration for OCTO — daemon registry, heartbeat dispatch,
+    bot provisioning. Gateway mounts this at <host>/fleet/api/; the spec describes
+    only /v1/<resource> (A.1).
+  title: Octo Fleet API
+  version: 1.0.0
+openapi: 3.1.0
+paths:
+  /bots:
+    get:
+      description: List the caller's bots in a space (offset-paginated). Scoped to
+        the authenticated owner.
+      operationId: bot.list
+      parameters:
+      - description: Space ID
+        in: query
+        name: space_id
+        required: true
+        schema:
+          type: string
+      - description: Filter by runtime kind
+        in: query
+        name: runtime_kind
+        schema:
+          type: string
+      - description: Page number, default 1
+        in: query
+        name: page
+        schema:
+          type: integer
+      - description: Page size, default 20, max 100
+        in: query
+        name: page_size
+        schema:
+          type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.OffsetList-runtime_botResp'
+          description: bots
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: VALIDATION_ERROR
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: AUTH_REQUIRED
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: FORBIDDEN
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: INTERNAL_ERROR
+      security:
+      - SessionToken: []
+      summary: List bots
+      tags:
+      - bot
+    post:
+      description: Create a draft bot on a runtime the caller owns. Returns the draft;
+        mint it via POST /bots/{bot_id}/mint to start provisioning.
+      operationId: bot.create
+      requestBody:
+        content:
+          application/json:
+            schema:
+              oneOf:
+              - type: object
+              - $ref: '#/components/schemas/runtime.createBotReq'
+                description: runtime_id, name, runtime_kind
+                summary: body
+        description: runtime_id, name, runtime_kind
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Data-runtime_botResp'
+          description: draft bot
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: VALIDATION_ERROR
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: AUTH_REQUIRED
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: FORBIDDEN
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: INTERNAL_ERROR
+      security:
+      - SessionToken: []
+      summary: Create a bot
+      tags:
+      - bot
+  /bots/{bot_id}:
+    delete:
+      description: Soft-delete (status=archived) a bot the caller owns; emits a managed_bots_changed
+        removal to its daemon.
+      operationId: bot.archive
+      parameters:
+      - description: Bot ID
+        in: path
+        name: bot_id
+        required: true
+        schema:
+          type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Data-envelope_EmptyResp'
+          description: archived
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: AUTH_REQUIRED
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: FORBIDDEN
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: NOT_FOUND
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: INTERNAL_ERROR
+      security:
+      - SessionToken: []
+      summary: Archive a bot
+      tags:
+      - bot
+    get:
+      description: Read a single bot the caller owns.
+      operationId: bot.get
+      parameters:
+      - description: Bot ID
+        in: path
+        name: bot_id
+        required: true
+        schema:
+          type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Data-runtime_botResp'
+          description: bot
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: AUTH_REQUIRED
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: FORBIDDEN
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: NOT_FOUND
+      security:
+      - SessionToken: []
+      summary: Get a bot
+      tags:
+      - bot
+  /bots/{bot_id}/ack:
+    post:
+      description: Daemon reports the provision result (active / failed). claim_token
+        must match the dispatched token. On failed, emits a managed_bots_changed removal.
+      operationId: bot.ack
+      parameters:
+      - description: Bot ID
+        in: path
+        name: bot_id
+        required: true
+        schema:
+          type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              oneOf:
+              - type: object
+              - $ref: '#/components/schemas/runtime.ackBotReq'
+                description: claim_token + status
+                summary: body
+        description: claim_token + status
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Data-envelope_EmptyResp'
+          description: acked
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: VALIDATION_ERROR
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: AUTH_REQUIRED
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: FORBIDDEN
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: NOT_FOUND
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: CONFLICT
+      security:
+      - Bearer: []
+      summary: Ack bot provision
+      tags:
+      - bot
+  /bots/{bot_id}/mint:
+    post:
+      description: Attach the server-minted bot_uid to a draft bot and start provisioning
+        (openclaw) or activate it. Idempotent only from draft state.
+      operationId: bot.mint
+      parameters:
+      - description: Bot ID
+        in: path
+        name: bot_id
+        required: true
+        schema:
+          type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              oneOf:
+              - type: object
+              - $ref: '#/components/schemas/runtime.patchBotMintReq'
+                description: bot_uid from server mint
+                summary: body
+        description: bot_uid from server mint
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Data-runtime_botResp'
+          description: minted bot
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: VALIDATION_ERROR
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: AUTH_REQUIRED
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: FORBIDDEN
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: NOT_FOUND
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: CONFLICT
+      security:
+      - SessionToken: []
+      summary: Mint a bot
+      tags:
+      - bot
+  /bots/{bot_id}/provision:
+    get:
+      description: Daemon fetches the full bot.provision payload (workspace_id, bot_uid,
+        claim_token; never bot_token) and atomically claims it (bot_minted->dispatched).
+        Idempotent while dispatched; 409 once active/archived.
+      operationId: bot.provision.get
+      parameters:
+      - description: Bot ID (== provision command id)
+        in: path
+        name: bot_id
+        required: true
+        schema:
+          type: integer
+      - description: Caller's runtime ID (ownership-bound)
+        in: query
+        name: runtime_id
+        required: true
+        schema:
+          type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Data-runtime_botProvisionFetchResponse'
+          description: provision payload
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: VALIDATION_ERROR
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: AUTH_REQUIRED
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: FORBIDDEN
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: 'CONFLICT: not provisionable'
+      security:
+      - Bearer: []
+      summary: Fetch bot provision payload
+      tags:
+      - bot
+  /providers:
+    get:
+      description: Returns the active runtime-provider catalog (claude / openclaw
+        / ...) a daemon may run. Read-only.
+      operationId: provider.list
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Data-runtime_providersResp'
+          description: active providers
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: AUTH_REQUIRED
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: FORBIDDEN
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: INTERNAL_ERROR
+      security:
+      - Bearer: []
+      summary: List active runtime providers
+      tags:
+      - provider
+  /runtime_latest_versions:
+    post:
+      description: 'Admin-only: register the latest version + optional release metadata
+        for a component (daemon / plugin / active provider). Authenticated by the
+        X-Runtime-Admin-Token header, not a JWT.'
+      operationId: runtime_latest_version.upsert
+      requestBody:
+        content:
+          application/json:
+            schema:
+              oneOf:
+              - type: object
+              - $ref: '#/components/schemas/runtime.upsertLatestVersionReq'
+                description: Component version + optional release metadata
+                summary: body
+        description: Component version + optional release metadata
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Data-envelope_EmptyResp'
+          description: upserted
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: VALIDATION_ERROR
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: AUTH_REQUIRED
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: INTERNAL_ERROR
+      security:
+      - AdminToken: []
+      summary: Upsert a component's latest version
+      tags:
+      - upgrade
+  /runtimes:
+    get:
+      description: 'Aggregate view for the runtime management UI: the caller''s runtimes
+        plus per-runtime / per-daemon update hints and in-progress upgrades. Single
+        object (not paginated); the set is small (one user''s devices).'
+      operationId: runtime.list
+      parameters:
+      - description: Space ID
+        in: query
+        name: space_id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Data-runtime_runtimesView'
+          description: runtimes + hints
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: VALIDATION_ERROR
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: AUTH_REQUIRED
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: FORBIDDEN
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: INTERNAL_ERROR
+      security:
+      - SessionToken: []
+      summary: List runtimes in a space
+      tags:
+      - runtime
+    post:
+      description: Register (upsert) this daemon's detected runtimes. Idempotent;
+        disabled/unknown providers are dropped server-side.
+      operationId: runtime.register
+      requestBody:
+        content:
+          application/json:
+            schema:
+              oneOf:
+              - type: object
+              - $ref: '#/components/schemas/runtime.registerReq'
+                description: Daemon + runtimes to register
+                summary: body
+        description: Daemon + runtimes to register
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Data-runtime_registerResp'
+          description: registered runtimes
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: VALIDATION_ERROR
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: AUTH_REQUIRED
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: FORBIDDEN
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: INTERNAL_ERROR
+      security:
+      - Bearer: []
+      summary: Register daemon runtimes
+      tags:
+      - runtime
+  /runtimes/_deregister:
+    post:
+      description: Batch-mark this daemon's runtimes offline. Idempotent; unknown
+        ids are skipped.
+      operationId: runtime.deregister
+      requestBody:
+        content:
+          application/json:
+            schema:
+              oneOf:
+              - type: object
+              - $ref: '#/components/schemas/runtime.deregisterReq'
+                description: runtime_ids to mark offline
+                summary: body
+        description: runtime_ids to mark offline
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Data-envelope_EmptyResp'
+          description: deregistered
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: VALIDATION_ERROR
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: AUTH_REQUIRED
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: FORBIDDEN
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: INTERNAL_ERROR
+      security:
+      - Bearer: []
+      summary: Deregister runtimes
+      tags:
+      - runtime
+  /runtimes/{runtime_id}:
+    delete:
+      description: Hard-delete a runtime the caller owns.
+      operationId: runtime.delete
+      parameters:
+      - description: Runtime ID
+        in: path
+        name: runtime_id
+        required: true
+        schema:
+          type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Data-envelope_EmptyResp'
+          description: deleted
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: VALIDATION_ERROR
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: AUTH_REQUIRED
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: FORBIDDEN
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: NOT_FOUND
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: INTERNAL_ERROR
+      security:
+      - SessionToken: []
+      summary: Delete a runtime
+      tags:
+      - runtime
+  /runtimes/{runtime_id}/events:
+    get:
+      description: Long-lived Server-Sent Events stream for reverse-dispatch (upgrade
+        / bot_provision / managed_bots_changed). Resumable via Last-Event-ID; 60s
+        TTL forces reconnect + re-verify. Success body is text/event-stream, not JSON.
+      operationId: event.stream
+      parameters:
+      - description: Runtime ID to subscribe
+        in: path
+        name: runtime_id
+        required: true
+        schema:
+          type: integer
+      - description: Resume from this event id
+        in: header
+        name: Last-Event-ID
+        schema:
+          type: string
+      responses:
+        "200":
+          description: SSE stream over text/event-stream (not a JSON body, so no content
+            schema is declared). Connection-level errors (invalid runtime_id → 400,
+            auth → 401/403, internal → 500) are returned as a JSON envelope.Error
+            by middleware before the stream opens.
+      security:
+      - Bearer: []
+      summary: Daemon event stream (SSE)
+      tags:
+      - event
+  /runtimes/{runtime_id}/heartbeat:
+    post:
+      description: Liveness tick for one runtime. Returns reverse-dispatch piggyback
+        (pending upgrade task / bot.provision command / managed bots) for the daemon
+        to act on this tick.
+      operationId: runtime.heartbeat
+      parameters:
+      - description: Runtime ID
+        in: path
+        name: runtime_id
+        required: true
+        schema:
+          type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Data-runtime_heartbeatResp'
+          description: dispatch piggyback
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: AUTH_REQUIRED
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: FORBIDDEN
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: NOT_FOUND
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: INTERNAL_ERROR
+      security:
+      - Bearer: []
+      summary: Daemon heartbeat
+      tags:
+      - runtime
+  /upgrades:
+    post:
+      description: Queue a daemon / runtime-component / plugin upgrade for a daemon
+        the caller owns. Rejected if already up to date or one is already in progress.
+      operationId: upgrade.create
+      requestBody:
+        content:
+          application/json:
+            schema:
+              oneOf:
+              - type: object
+              - $ref: '#/components/schemas/runtime.upgradeInitReq'
+                description: Upgrade request (daemon_id, space_id, component, runtime_id)
+                summary: body
+        description: Upgrade request (daemon_id, space_id, component, runtime_id)
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Data-runtime_upgradeInitResp'
+          description: task created
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: VALIDATION_ERROR
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: AUTH_REQUIRED
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: FORBIDDEN
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: CONFLICT
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: INTERNAL_ERROR
+      security:
+      - SessionToken: []
+      summary: Create an upgrade task
+      tags:
+      - upgrade
+  /upgrades/{task_id}:
+    get:
+      description: Read the current status of an upgrade task the caller owns.
+      operationId: upgrade.get
+      parameters:
+      - description: Upgrade task ID
+        in: path
+        name: task_id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Data-runtime_upgradeGetResp'
+          description: task status
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: AUTH_REQUIRED
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: FORBIDDEN
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: NOT_FOUND
+      security:
+      - SessionToken: []
+      summary: Get upgrade task status
+      tags:
+      - upgrade
+  /upgrades/{task_id}/report:
+    post:
+      description: Daemon reports an upgrade task's state transition (downloading
+        / installing / succeeded / failed). Rejected on invalid transition.
+      operationId: upgrade.report
+      parameters:
+      - description: Upgrade task ID
+        in: path
+        name: task_id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              oneOf:
+              - type: object
+              - $ref: '#/components/schemas/runtime.upgradeReportReq'
+                description: status + error
+                summary: body
+        description: status + error
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Data-envelope_EmptyResp'
+          description: recorded
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: VALIDATION_ERROR
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: AUTH_REQUIRED
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: FORBIDDEN
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: NOT_FOUND
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: CONFLICT
+      security:
+      - Bearer: []
+      summary: Report upgrade progress
+      tags:
+      - upgrade
+servers:
+- url: /v1
+tags:
+- description: Agent runtime registry — register, heartbeat, deregister, list, delete.
+  name: runtime
+- description: Bot orchestration — create, mint, provision, ack, archive.
+  name: bot
+- description: Component / daemon upgrade tasks.
+  name: upgrade
+- description: Runtime-provider catalog.
+  name: provider
+- description: Daemon SSE reverse-dispatch stream.
+  name: event

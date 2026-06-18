@@ -11,3 +11,6 @@ test:
 
 clean:
 	rm -rf bin/
+
+# OpenAPI toolchain (installed by octo-openapi-dev-skill main)
+include tools/octo-api/assets/openapi.mk

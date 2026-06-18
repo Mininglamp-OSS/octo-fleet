@@ -15,10 +15,12 @@
 -- time, and the 24h TTL sweeper is app-driven so it may lag at migration time).
 -- It is also unnecessary: ping events are no longer produced (dispatchPing
 -- removed), and any leftover ping row replayed via querySince is inert — an
--- upgraded daemon advances its cursor past the unknown event; an old daemon
--- hits the no-op /v1/daemon/ping/:id (200) and advances too. The 24h event_log
--- TTL sweeper reaps residual rows. If an operator wants them gone immediately,
--- run a batched/indexed DELETE out-of-band, not in this schema migration.
+-- upgraded daemon advances its cursor past the unknown event. (No "old daemon"
+-- concern: the OpenAPI-adoption cutover removed the /v1/daemon/* routes
+-- entirely, so any daemon old enough to emit ping is already cut off at
+-- register/heartbeat.) The 24h event_log TTL sweeper reaps residual rows. If an
+-- operator wants them gone immediately, run a batched/indexed DELETE
+-- out-of-band, not in this schema migration.
 DROP TABLE IF EXISTS `runtime_ping`;
 
 -- +migrate Down

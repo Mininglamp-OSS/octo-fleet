@@ -3,13 +3,14 @@ package auth
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/Mininglamp-OSS/octo-fleet/internal/envelope"
+	"github.com/Mininglamp-OSS/octo-fleet/internal/errcode"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
 	"github.com/gin-gonic/gin"
 )
@@ -158,6 +159,16 @@ func (c *verifyCache) set(key string, result interface{}, ttl time.Duration) {
 	c.entries[key] = verifyCacheEntry{result: result, expireAt: time.Now().Add(ttl)}
 }
 
+// abortErr writes the R1/R2 error envelope and aborts. Auth failures map to
+// a single generic code (anti-enumeration): the specific reason stays in
+// logs, not on the wire. i18n increment localizes code.Message later.
+func abortErr(c *gin.Context, code errcode.Code) {
+	c.AbortWithStatusJSON(code.HTTPStatus, envelope.Error{Error: envelope.ErrorBody{
+		Code:    code.Code,
+		Message: code.Message,
+	}})
+}
+
 func AuthMiddleware(cfg Config) gin.HandlerFunc {
 	client := &http.Client{Timeout: 5 * time.Second}
 	cache := newVerifyCache()
@@ -179,18 +190,14 @@ func AuthMiddleware(cfg Config) gin.HandlerFunc {
 			}
 			// 合并 plan 决策一+二 Phase 4: 非 uk_/bf_ 的 Bearer 直接 401
 			// (旧 JWT 路径已删, 不再 fall through 让 server verify-bot 兜底).
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-				"error": gin.H{"code": "UNAUTHORIZED", "message": "Bearer token must start with uk_ or bf_"},
-			})
+			abortErr(c, errcode.AuthRequired)
 			return
 		}
 
 		// User token auth
 		token := c.GetHeader("token")
 		if token == "" {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-				"error": gin.H{"code": "UNAUTHORIZED", "message": "missing token or Authorization header"},
-			})
+			abortErr(c, errcode.AuthRequired)
 			return
 		}
 		handleUserAuth(c, client, cfg.OctoIMURL, token, cache)
@@ -211,26 +218,20 @@ func handleUserAuth(c *gin.Context, client *http.Client, baseURL, token string, 
 	// against server-validated data instead of client-supplied headers.
 	resp, err := client.Post(baseURL+"/v1/auth/verify?include=context", "application/json", bytes.NewReader(body))
 	if err != nil {
-		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
-			"error": gin.H{"code": "AUTH_UNAVAILABLE", "message": "failed to reach auth service"},
-		})
+		abortErr(c, errcode.UpstreamUnavailable)
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		io.Copy(io.Discard, resp.Body)
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-			"error": gin.H{"code": "UNAUTHORIZED", "message": "invalid or expired token"},
-		})
+		abortErr(c, errcode.AuthRequired)
 		return
 	}
 
 	var result verifyTokenResp
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{
-			"error": gin.H{"code": "AUTH_ERROR", "message": "failed to parse auth response"},
-		})
+		abortErr(c, errcode.InternalError)
 		return
 	}
 
@@ -300,26 +301,20 @@ func handleBotAuth(c *gin.Context, client *http.Client, baseURL, botToken string
 	body, _ := json.Marshal(map[string]string{"bot_token": botToken})
 	resp, err := client.Post(baseURL+"/v1/auth/verify-bot", "application/json", bytes.NewReader(body))
 	if err != nil {
-		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
-			"error": gin.H{"code": "AUTH_UNAVAILABLE", "message": "failed to reach auth service"},
-		})
+		abortErr(c, errcode.UpstreamUnavailable)
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		io.Copy(io.Discard, resp.Body)
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-			"error": gin.H{"code": "UNAUTHORIZED", "message": "invalid bot token"},
-		})
+		abortErr(c, errcode.AuthRequired)
 		return
 	}
 
 	var result verifyBotResp
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{
-			"error": gin.H{"code": "AUTH_ERROR", "message": "failed to parse auth response"},
-		})
+		abortErr(c, errcode.InternalError)
 		return
 	}
 
@@ -367,26 +362,20 @@ func handleAPIKeyAuth(c *gin.Context, client *http.Client, baseURL, apiKey strin
 	// without a separate query.
 	resp, err := client.Post(baseURL+"/v1/auth/verify-api-key?include=context", "application/json", bytes.NewReader(body))
 	if err != nil {
-		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
-			"error": gin.H{"code": "AUTH_UNAVAILABLE", "message": "failed to reach auth service"},
-		})
+		abortErr(c, errcode.UpstreamUnavailable)
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		io.Copy(io.Discard, resp.Body)
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-			"error": gin.H{"code": "UNAUTHORIZED", "message": "invalid api_key"},
-		})
+		abortErr(c, errcode.AuthRequired)
 		return
 	}
 
 	var result verifyAPIKeyResp
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{
-			"error": gin.H{"code": "AUTH_ERROR", "message": "failed to parse auth response"},
-		})
+		abortErr(c, errcode.InternalError)
 		return
 	}
 
@@ -438,12 +427,7 @@ func RequireKind(allowed ...string) gin.HandlerFunc {
 		raw, _ := c.Get("auth_kind")
 		kind, _ := raw.(string)
 		if _, ok := set[kind]; !ok {
-			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
-				"error": gin.H{
-					"code":    "AUTH_KIND_NOT_ALLOWED",
-					"message": fmt.Sprintf("endpoint requires one of: %s", strings.Join(allowed, ", ")),
-				},
-			})
+			abortErr(c, errcode.Forbidden)
 			return
 		}
 	}
@@ -540,12 +524,7 @@ func Middleware(scope string) wkhttp.HandlerFunc {
 					// Cover both: (a) X-Space-Id is not in the verified
 					// set, (b) caller's verified set is empty (zero
 					// memberships). Same 403, no info leak.
-					c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
-						"error": gin.H{
-							"code":    "FORBIDDEN",
-							"message": "X-Space-Id not in caller's space membership",
-						},
-					})
+					abortErr(c.Context, errcode.Forbidden)
 					return
 				}
 			}

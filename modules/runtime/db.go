@@ -275,15 +275,8 @@ func (d *runtimeDB) queryBotInfoByUIDsLegacy(spaceID string, uids []string) (map
 // leak). Scoping by (space, owner) closes that without changing the
 // heartbeat happy-path. Caller (heartbeat) already has both values from
 // the agent_runtime row it just loaded — no N+1.
-func (d *runtimeDB) listActiveBotsForDaemon(daemonID, spaceID, ownerUID string) ([]struct {
-	BotUID      string `json:"bot_uid" db:"bot_uid"`
-	WorkspaceID string `json:"workspace_id" db:"workspace_id"`
-}, error) {
-	type row struct {
-		BotUID      string `json:"bot_uid" db:"bot_uid"`
-		WorkspaceID string `json:"workspace_id" db:"workspace_id"`
-	}
-	var rows []row
+func (d *runtimeDB) listActiveBotsForDaemon(daemonID, spaceID, ownerUID string) ([]managedBot, error) {
+	var rows []managedBot
 	_, err := d.session.SelectBySql(
 		`SELECT b.bot_uid, b.workspace_id
 		   FROM bot b
@@ -294,15 +287,7 @@ func (d *runtimeDB) listActiveBotsForDaemon(daemonID, spaceID, ownerUID string) 
 	if err != nil {
 		return nil, err
 	}
-	out := make([]struct {
-		BotUID      string `json:"bot_uid" db:"bot_uid"`
-		WorkspaceID string `json:"workspace_id" db:"workspace_id"`
-	}, len(rows))
-	for i, r := range rows {
-		out[i].BotUID = r.BotUID
-		out[i].WorkspaceID = r.WorkspaceID
-	}
-	return out, nil
+	return rows, nil
 }
 
 // loadProviders 读取 runtime_provider 全表，供 providerRegistry 刷新快照。

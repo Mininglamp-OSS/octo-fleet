@@ -128,19 +128,27 @@ and the spec at
 ## 🔌 HTTP API
 
 ### Daemon endpoints (JWT scope=daemon)
-- `POST /v1/daemon/register`
-- `POST /v1/daemon/heartbeat` — returns `pending_command` (bot.provision) + `managed_bots`
-- `POST /v1/daemon/deregister`
-- `POST /v1/daemon/{upgrade,bots,bot-tasks}/...` ack endpoints
-  (`/v1/daemon/ping/:id` remains as a deprecated no-op compatibility shim — the
-  Server Ping feature was removed; it is not part of the supported API surface)
+- `POST   /v1/runtimes` — register
+- `POST   /v1/runtimes/{runtime_id}/heartbeat` — liveness; returns pending upgrade task / bot.provision command + `managed_bots`
+- `POST   /v1/runtimes/_deregister` — deregister
+- `GET    /v1/runtimes/{runtime_id}/events` — SSE reverse-dispatch stream
+- `GET    /v1/bots/{bot_id}/provision` — fetch the bot.provision payload (workspace_id, bot_uid, claim_token; **never** `bot_token`)
+- `POST   /v1/bots/{bot_id}/ack` — ack a provision command
+- `GET    /v1/providers` — list active agent providers
+- `POST   /v1/upgrades/{task_id}/report` — report upgrade task result
 
 ### Web endpoints (JWT scope=web)
-- `GET  /v1/runtimes` — list registered runtimes in space
-- `POST /v1/runtimes/bots` — create bot (draft)
-- `POST /v1/runtimes/bots/:id/mint` — patch with server-minted `bot_uid` to start provision
-- `GET  /v1/runtimes/bots[/:id]` — read APIs (bot feed moved to matter: `GET /matter/api/v1/bots/:bot_uid/feed`)
-- `DELETE /v1/runtimes/bots/:id` — archive
+- `GET    /v1/runtimes` — list registered runtimes in space
+- `DELETE /v1/runtimes/{runtime_id}` — remove a runtime
+- `POST   /v1/bots` — create bot (draft)
+- `POST   /v1/bots/{bot_id}/mint` — patch with server-minted `bot_uid` to start provision
+- `GET    /v1/bots` · `GET /v1/bots/{bot_id}` — list / read (bot feed moved to matter: `GET /matter/api/v1/bots/:bot_uid/feed`)
+- `DELETE /v1/bots/{bot_id}` — archive
+- `POST   /v1/upgrades` — init an upgrade task
+- `GET    /v1/upgrades/{task_id}` — get upgrade task status
+
+### Admin endpoints (X-Runtime-Admin-Token)
+- `POST   /v1/runtime_latest_versions` — upsert a component's latest version + release metadata
 
 ## 🚧 PoC status
 

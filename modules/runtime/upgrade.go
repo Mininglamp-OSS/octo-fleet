@@ -2,14 +2,14 @@ package runtime
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/Mininglamp-OSS/octo-fleet/internal/auth"
+	_ "github.com/Mininglamp-OSS/octo-fleet/internal/envelope" // swag @Success/@Failure type resolution
+	"github.com/Mininglamp-OSS/octo-fleet/internal/errcode"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
-	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 )
 
@@ -27,17 +27,32 @@ const (
 	fallbackComponentTimeoutSec = 1800
 )
 
-// POST /v1/runtimes/upgrade
+// upgradeInit godoc
+// @Summary      Create an upgrade task
+// @Description  Queue a daemon / runtime-component / plugin upgrade for a daemon the caller owns. Rejected if already up to date or one is already in progress.
+// @Tags         upgrade
+// @ID           upgrade.create
+// @Accept       json
+// @Produce      json
+// @Security     SessionToken
+// @Param        body body upgradeInitReq true "Upgrade request (daemon_id, space_id, component, runtime_id)"
+// @Success      201 {object} envelope.Data[upgradeInitResp] "task created"
+// @Failure      400 {object} envelope.Error "VALIDATION_ERROR"
+// @Failure      401 {object} envelope.Error "AUTH_REQUIRED"
+// @Failure      403 {object} envelope.Error "FORBIDDEN"
+// @Failure      409 {object} envelope.Error "CONFLICT"
+// @Failure      500 {object} envelope.Error "INTERNAL_ERROR"
+// @Router       /upgrades [post]
 func (rt *Runtime) upgradeInit(c *wkhttp.Context) {
 	loginUID := c.GetLoginUID()
 
 	var req upgradeInitReq
 	if err := c.BindJSON(&req); err != nil {
-		c.ResponseError(errors.New("invalid request body"))
+		responseError(c, errcode.Validation)
 		return
 	}
 	if req.DaemonID == "" || req.SpaceID == "" {
-		c.ResponseError(errors.New("daemon_id and space_id are required"))
+		responseError(c, errcode.Validation)
 		return
 	}
 	component := req.Component
@@ -47,7 +62,7 @@ func (rt *Runtime) upgradeInit(c *wkhttp.Context) {
 
 	// 1. 校验 space — FLEET MIGRATION: trust JWT.space_id.
 	if !auth.MatchesSpace(c, req.SpaceID) {
-		c.ResponseErrorWithStatus(errors.New("no permission"), 403)
+		responseError(c, errcode.Forbidden)
 		return
 	}
 	_ = loginUID
@@ -58,7 +73,7 @@ func (rt *Runtime) upgradeInit(c *wkhttp.Context) {
 		Where("space_id=? AND daemon_id=? AND owner_uid=?", req.SpaceID, req.DaemonID, loginUID).
 		Limit(1).Load(&daemon)
 	if err != nil || daemon.DaemonID == "" {
-		c.ResponseErrorWithStatus(errors.New("daemon not found or not owned by you"), 403)
+		responseError(c, errcode.Forbidden)
 		return
 	}
 
@@ -69,7 +84,7 @@ func (rt *Runtime) upgradeInit(c *wkhttp.Context) {
 		req.SpaceID, req.DaemonID, loginUID,
 	).LoadOne(&onlineCount)
 	if onlineCount == 0 {
-		c.ResponseError(errors.New("daemon is offline, cannot upgrade"))
+		responseError(c, errcode.Conflict)
 		return
 	}
 
@@ -82,7 +97,7 @@ func (rt *Runtime) upgradeInit(c *wkhttp.Context) {
 	case rt.providers.IsActiveKind(component):
 		rt.createComponentUpgradeTask(c, loginUID, &req, &daemon, component)
 	default:
-		c.ResponseError(fmt.Errorf("unsupported component: %s", component))
+		responseError(c, errcode.Validation)
 	}
 }
 
@@ -90,7 +105,7 @@ func (rt *Runtime) upgradeInit(c *wkhttp.Context) {
 // 校验：runtime_id 归属当前用户、runtime.Provider == component、当前版本严格落后于 latest。
 func (rt *Runtime) createComponentUpgradeTask(c *wkhttp.Context, loginUID string, req *upgradeInitReq, daemon *agentRuntimeModel, component string) {
 	if req.RuntimeID == 0 {
-		c.ResponseError(errors.New("runtime_id is required for component upgrade"))
+		responseError(c, errcode.Validation)
 		return
 	}
 
@@ -101,18 +116,18 @@ func (rt *Runtime) createComponentUpgradeTask(c *wkhttp.Context, loginUID string
 			req.RuntimeID, req.SpaceID, req.DaemonID, loginUID).
 		Limit(1).Load(&runtime)
 	if err != nil || runtime.Id == 0 {
-		c.ResponseErrorWithStatus(errors.New("runtime not found or not owned by you"), 403)
+		responseError(c, errcode.Forbidden)
 		return
 	}
 	if runtime.Provider != component {
-		c.ResponseError(fmt.Errorf("component %s does not match runtime provider %s", component, runtime.Provider))
+		responseError(c, errcode.Validation)
 		return
 	}
 
 	// 版本对比：runtime.Version 是 daemon 上报的当前版本
 	fromVersion := runtime.Version
 	if fromVersion == "" {
-		c.ResponseError(errors.New("current version not available on runtime"))
+		responseError(c, errcode.Validation)
 		return
 	}
 
@@ -124,18 +139,18 @@ func (rt *Runtime) createComponentUpgradeTask(c *wkhttp.Context, loginUID string
 		component,
 	).Load(&versionRow)
 	if err != nil || versionRow.LatestVersion == "" {
-		c.ResponseError(fmt.Errorf("no latest version available for %s", component))
+		responseError(c, errcode.Validation)
 		return
 	}
 
 	// 严格落后检查：dev/unknown 视为比任何正式版本都旧
 	if fromVersion == versionRow.LatestVersion {
-		c.ResponseError(errors.New("already up to date"))
+		responseError(c, errcode.Conflict)
 		return
 	}
 	if fromVersion != "dev" && fromVersion != "unknown" {
 		if !isVersionOlder(fromVersion, versionRow.LatestVersion) {
-			c.ResponseError(errors.New("downgrade not allowed"))
+			responseError(c, errcode.Conflict)
 			return
 		}
 	}
@@ -168,7 +183,7 @@ func (rt *Runtime) createDaemonUpgradeTask(c *wkhttp.Context, loginUID string, r
 	}
 	json.Unmarshal([]byte(daemon.DeviceInfo), &deviceInfo)
 	if deviceInfo.OS == "windows" {
-		c.ResponseError(errors.New("Windows remote upgrade is not supported in v1"))
+		responseError(c, errcode.Validation)
 		return
 	}
 
@@ -182,7 +197,7 @@ func (rt *Runtime) createDaemonUpgradeTask(c *wkhttp.Context, loginUID string, r
 		componentDaemon,
 	).Load(&versionRow)
 	if err != nil || versionRow.LatestVersion == "" {
-		c.ResponseError(errors.New("no latest version available for octo-daemon"))
+		responseError(c, errcode.Validation)
 		return
 	}
 
@@ -194,25 +209,26 @@ func (rt *Runtime) createDaemonUpgradeTask(c *wkhttp.Context, loginUID string, r
 	fromVersion := metaJSON.CLIVersion
 
 	if fromVersion != "" && fromVersion == versionRow.LatestVersion {
-		c.ResponseError(errors.New("already up to date"))
+		responseError(c, errcode.Conflict)
 		return
 	}
 	if fromVersion != "" && fromVersion != "dev" && fromVersion != "unknown" {
 		if !isVersionOlder(fromVersion, versionRow.LatestVersion) {
-			c.ResponseError(errors.New("downgrade not allowed"))
+			responseError(c, errcode.Conflict)
 			return
 		}
 	}
 
 	// 匹配 asset
 	if versionRow.ReleaseMeta == "" {
-		c.ResponseError(errors.New("no release metadata available"))
+		responseError(c, errcode.Validation)
 		return
 	}
 	var meta releaseMetaJSON
 	if err := json.Unmarshal([]byte(versionRow.ReleaseMeta), &meta); err != nil {
 		rt.Error("parse release_meta", zap.Error(err))
-		c.ResponseError(errors.New("invalid release metadata"))
+		// corrupt server-stored release_meta, not client input → 500
+		responseError(c, errcode.InternalError)
 		return
 	}
 	osName := normalizeOS(deviceInfo.OS)
@@ -225,12 +241,12 @@ func (rt *Runtime) createDaemonUpgradeTask(c *wkhttp.Context, loginUID string, r
 		}
 	}
 	if matchedAsset == nil {
-		c.ResponseError(fmt.Errorf("no matching asset for %s/%s", osName, archName))
+		responseError(c, errcode.Validation)
 		return
 	}
 	checksum := meta.Checksums[matchedAsset.Name]
 	if checksum == "" {
-		c.ResponseError(errors.New("no checksum for asset"))
+		responseError(c, errcode.Validation)
 		return
 	}
 
@@ -250,7 +266,7 @@ func (rt *Runtime) createDaemonUpgradeTask(c *wkhttp.Context, loginUID string, r
 // octo 插件升级
 func (rt *Runtime) createPluginUpgradeTask(c *wkhttp.Context, loginUID string, req *upgradeInitReq, daemon *agentRuntimeModel, component string) {
 	if req.RuntimeID == 0 {
-		c.ResponseError(errors.New("runtime_id is required for plugin upgrade"))
+		responseError(c, errcode.Validation)
 		return
 	}
 
@@ -261,12 +277,12 @@ func (rt *Runtime) createPluginUpgradeTask(c *wkhttp.Context, loginUID string, r
 			req.RuntimeID, req.SpaceID, req.DaemonID, loginUID).
 		Limit(1).Load(&runtime)
 	if err != nil || runtime.Id == 0 {
-		c.ResponseErrorWithStatus(errors.New("runtime not found or not owned by you"), 403)
+		responseError(c, errcode.Forbidden)
 		return
 	}
 	// 组件必须是该 provider 的 octo 适配插件（octo↔openclaw / cc-octo↔claude）
 	if !validPluginForProvider(component, runtime.Provider) {
-		c.ResponseError(fmt.Errorf("%s is not the plugin component for %s runtime", component, runtime.Provider))
+		responseError(c, errcode.Validation)
 		return
 	}
 
@@ -286,7 +302,7 @@ func (rt *Runtime) createPluginUpgradeTask(c *wkhttp.Context, loginUID string, r
 		}
 	}
 	if fromVersion == "" {
-		c.ResponseError(fmt.Errorf("%s not installed on this runtime", component))
+		responseError(c, errcode.Validation)
 		return
 	}
 
@@ -299,17 +315,17 @@ func (rt *Runtime) createPluginUpgradeTask(c *wkhttp.Context, loginUID string, r
 		component,
 	).Load(&versionRow)
 	if err != nil || versionRow.LatestVersion == "" {
-		c.ResponseError(errors.New("no latest version available for " + component))
+		responseError(c, errcode.Validation)
 		return
 	}
 
 	// 版本校验：必须严格落后
 	if fromVersion == versionRow.LatestVersion {
-		c.ResponseError(errors.New("already up to date"))
+		responseError(c, errcode.Conflict)
 		return
 	}
 	if !isVersionOlder(fromVersion, versionRow.LatestVersion) {
-		c.ResponseError(errors.New("downgrade not allowed"))
+		responseError(c, errcode.Conflict)
 		return
 	}
 
@@ -355,7 +371,7 @@ type insertTaskArgs struct {
 func (rt *Runtime) insertUpgradeTask(c *wkhttp.Context, args insertTaskArgs) {
 	tx, err := rt.db.session.Begin()
 	if err != nil {
-		c.ResponseError(errors.New("internal error"))
+		responseError(c, errcode.InternalError)
 		return
 	}
 	defer tx.RollbackUnlessCommitted()
@@ -379,7 +395,7 @@ func (rt *Runtime) insertUpgradeTask(c *wkhttp.Context, args insertTaskArgs) {
 		args.DaemonID, args.SpaceID, args.OwnerUID,
 	).Load(&lockRow)
 	if err != nil {
-		c.ResponseError(errors.New("internal error"))
+		responseError(c, errcode.InternalError)
 		return
 	}
 
@@ -394,11 +410,11 @@ func (rt *Runtime) insertUpgradeTask(c *wkhttp.Context, args insertTaskArgs) {
 		args.DaemonID, args.SpaceID, args.OwnerUID,
 	).LoadOne(&activeCount); err != nil {
 		rt.Error("active upgrade count query", zap.Error(err), zap.String("daemon_id", args.DaemonID))
-		c.ResponseError(errors.New("internal error"))
+		responseError(c, errcode.InternalError)
 		return
 	}
 	if activeCount > 0 {
-		c.ResponseError(errors.New("an upgrade is already in progress for this daemon"))
+		responseError(c, errcode.Conflict)
 		return
 	}
 
@@ -411,7 +427,7 @@ func (rt *Runtime) insertUpgradeTask(c *wkhttp.Context, args insertTaskArgs) {
 	).Exec()
 	if err != nil {
 		rt.Error("create upgrade task", zap.Error(err))
-		c.ResponseError(errors.New("create upgrade task failed"))
+		responseError(c, errcode.InternalError)
 		return
 	}
 	// F-1 (lml2468 review): tx.Commit() err 必须接 — 之前 swallow 会返
@@ -419,7 +435,7 @@ func (rt *Runtime) insertUpgradeTask(c *wkhttp.Context, args insertTaskArgs) {
 	// 静默腐败. 接 err → 500 让 daemon 不收到 event, web 看到 5xx 重试.
 	if err := tx.Commit(); err != nil {
 		rt.Error("commit upgrade task", zap.Error(err), zap.String("task_id", taskID))
-		c.ResponseError(errors.New("create upgrade task failed"))
+		responseError(c, errcode.InternalError)
 		return
 	}
 
@@ -451,10 +467,23 @@ func (rt *Runtime) insertUpgradeTask(c *wkhttp.Context, args insertTaskArgs) {
 		})
 	}
 
-	c.Response(gin.H{"task_id": taskID})
+	ResponseCreated(c, upgradeInitResp{TaskID: taskID})
 }
 
-// GET /v1/runtimes/upgrade/:task_id
+// upgradeGet godoc
+// @Summary      Get upgrade task status
+// @Description  Read the current status of an upgrade task the caller owns.
+// @Tags         upgrade
+// @ID           upgrade.get
+// @Accept       json
+// @Produce      json
+// @Security     SessionToken
+// @Param        task_id path string true "Upgrade task ID"
+// @Success      200 {object} envelope.Data[upgradeGetResp] "task status"
+// @Failure      401 {object} envelope.Error "AUTH_REQUIRED"
+// @Failure      403 {object} envelope.Error "FORBIDDEN"
+// @Failure      404 {object} envelope.Error "NOT_FOUND"
+// @Router       /upgrades/{task_id} [get]
 func (rt *Runtime) upgradeGet(c *wkhttp.Context) {
 	loginUID := c.GetLoginUID()
 	taskID := c.Param("task_id")
@@ -465,26 +494,42 @@ func (rt *Runtime) upgradeGet(c *wkhttp.Context) {
 		 FROM runtime_upgrade_task WHERE id=?`, taskID,
 	).Load(&task)
 	if err != nil || task.ID == "" {
-		c.ResponseError(errors.New("task not found"))
+		responseError(c, errcode.NotFound)
 		return
 	}
 
 	if task.OwnerUID != loginUID {
-		c.ResponseErrorWithStatus(errors.New("no permission"), 403)
+		responseError(c, errcode.Forbidden)
 		return
 	}
 
-	c.Response(gin.H{
-		"id":           task.ID,
-		"component":    task.Component,
-		"status":       task.Status,
-		"from_version": task.FromVersion,
-		"to_version":   task.ToVersion,
-		"error_msg":    task.ErrorMsg,
+	ResponseData(c, upgradeGetResp{
+		ID:          task.ID,
+		Component:   task.Component,
+		Status:      task.Status,
+		FromVersion: task.FromVersion,
+		ToVersion:   task.ToVersion,
+		ErrorMsg:    task.ErrorMsg,
 	})
 }
 
-// POST /v1/daemon/upgrade/:task_id
+// upgradeReport godoc
+// @Summary      Report upgrade progress
+// @Description  Daemon reports an upgrade task's state transition (downloading / installing / succeeded / failed). Rejected on invalid transition.
+// @Tags         upgrade
+// @ID           upgrade.report
+// @Accept       json
+// @Produce      json
+// @Security     Bearer
+// @Param        task_id path string true "Upgrade task ID"
+// @Param        body body upgradeReportReq true "status + error"
+// @Success      200 {object} envelope.Data[envelope.EmptyResp] "recorded"
+// @Failure      400 {object} envelope.Error "VALIDATION_ERROR"
+// @Failure      401 {object} envelope.Error "AUTH_REQUIRED"
+// @Failure      403 {object} envelope.Error "FORBIDDEN"
+// @Failure      404 {object} envelope.Error "NOT_FOUND"
+// @Failure      409 {object} envelope.Error "CONFLICT"
+// @Router       /upgrades/{task_id}/report [post]
 func (rt *Runtime) upgradeReport(c *wkhttp.Context) {
 	ownerUID := c.MustGet("uid").(string)
 	apiSpaceID := c.MustGet("space_id").(string)
@@ -492,7 +537,7 @@ func (rt *Runtime) upgradeReport(c *wkhttp.Context) {
 
 	var req upgradeReportReq
 	if err := c.BindJSON(&req); err != nil {
-		c.ResponseError(errors.New("invalid request body"))
+		responseError(c, errcode.Validation)
 		return
 	}
 
@@ -502,18 +547,18 @@ func (rt *Runtime) upgradeReport(c *wkhttp.Context) {
 		 FROM runtime_upgrade_task WHERE id=?`, taskID,
 	).Load(&task)
 	if err != nil || task.ID == "" {
-		c.ResponseError(errors.New("task not found"))
+		responseError(c, errcode.NotFound)
 		return
 	}
 	if task.SpaceID != apiSpaceID || task.OwnerUID != ownerUID {
-		c.ResponseErrorWithStatus(errors.New("no permission"), 403)
+		responseError(c, errcode.Forbidden)
 		return
 	}
 
 	// 按 component 放行状态流转
 	allowed := validTransitionsFrom(task.Component, req.Status)
 	if allowed == nil {
-		c.ResponseError(errors.New("invalid status transition"))
+		responseError(c, errcode.Conflict)
 		return
 	}
 
@@ -527,14 +572,14 @@ func (rt *Runtime) upgradeReport(c *wkhttp.Context) {
 	).Exec()
 	if err != nil {
 		rt.Error("update upgrade task", zap.Error(err))
-		c.ResponseError(errors.New("update failed"))
+		responseError(c, errcode.InternalError)
 		return
 	}
 	if rows, _ := result.RowsAffected(); rows == 0 {
-		c.ResponseError(errors.New("invalid state transition"))
+		responseError(c, errcode.Conflict)
 		return
 	}
-	c.Response(gin.H{"status": "ok"})
+	ResponseEmpty(c)
 }
 
 // 按 component 返回目标状态允许从哪些前置状态流转而来；nil 表示不允许此状态。

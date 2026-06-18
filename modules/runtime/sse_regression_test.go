@@ -33,7 +33,7 @@ func TestSSERegression_OwnershipGate(t *testing.T) {
 
 // A3 secret-not-in-stream: dispatchBotProvision payload 只能含 command_id,
 // 不能含 bot_token / claim_token / workspace_id 等 secret/敏感字段.
-// daemon 端走 GET /v1/daemon/bot-provisions/:id 单独 fetch.
+// daemon 端走 GET /v1/bots/{bot_id}/provision 单独 fetch.
 func TestSSERegression_BotProvisionPayloadHasNoSecret(t *testing.T) {
 	body := extractFuncBody(t, mustReadSource(t, "sse.go"), "dispatchBotProvision")
 	forbidden := []string{"bot_token", "claim_token", "workspace_id", "BotToken", "ClaimToken", "WorkspaceID"}
@@ -139,26 +139,27 @@ func TestSSERegression_HeartbeatStillDispatchesPendingInPhaseA(t *testing.T) {
 	}
 }
 
-// SSE 路由必须经 daemon authMW (api_key Bearer). 没接进 r.Group("/v1/daemon")
-// 就裸暴露了 long-lived endpoint 给任意 caller.
+// SSE 路由必须经 daemon authMW (api_key Bearer). 没接进 daemon scope group
+// 就裸暴露了 long-lived endpoint 给任意 caller. (URL 资源化后路径无 daemon
+// 段,daemon/web 靠 scope 区分——见 api.go Route 注释。)
 func TestSSERegression_RoutesUnderDaemonAuthGroup(t *testing.T) {
 	body := extractFuncBody(t, mustReadSource(t, "api.go"), "Route")
-	// "GET("/events"" 必须在 daemon group block 内. 用粗 heuristic:
-	// daemon group 起始到结束的字符片段必须含两个新 endpoint.
-	daemonGroupStart := strings.Index(body, `daemon := r.Group("/v1/daemon"`)
+	// daemon scope group 起始到下一个 group (web) 之间的片段必须含 SSE +
+	// bot provision endpoint.
+	daemonGroupStart := strings.Index(body, `daemon := r.Group("/v1", auth.Middleware("daemon"))`)
 	if daemonGroupStart < 0 {
-		t.Fatal("Route 找不到 daemon group (auth middleware 已被改？)")
+		t.Fatal("Route 找不到 daemon scope group (auth middleware 已被改？)")
 	}
-	internalIdx := strings.Index(body[daemonGroupStart:], "internal := r.Group")
-	if internalIdx < 0 {
-		t.Fatal("Route 找不到 daemon group 结束 marker")
+	webIdx := strings.Index(body[daemonGroupStart:], "web := r.Group")
+	if webIdx < 0 {
+		t.Fatal("Route 找不到 daemon group 结束 marker (web group)")
 	}
-	daemonBlock := body[daemonGroupStart : daemonGroupStart+internalIdx]
-	if !strings.Contains(daemonBlock, `GET("/events"`) {
-		t.Error("GET /events 必须在 daemon authMW group 内")
+	daemonBlock := body[daemonGroupStart : daemonGroupStart+webIdx]
+	if !strings.Contains(daemonBlock, `GET("/runtimes/:runtime_id/events"`) {
+		t.Error("GET /runtimes/:runtime_id/events 必须在 daemon authMW group 内")
 	}
-	if !strings.Contains(daemonBlock, `GET("/bot-provisions/`) {
-		t.Error("GET /bot-provisions/:command_id 必须在 daemon authMW group 内")
+	if !strings.Contains(daemonBlock, `GET("/bots/:bot_id/provision"`) {
+		t.Error("GET /bots/:bot_id/provision 必须在 daemon authMW group 内")
 	}
 }
 

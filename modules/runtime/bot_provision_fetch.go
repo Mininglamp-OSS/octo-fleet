@@ -1,10 +1,10 @@
 package runtime
 
 import (
-	"errors"
-	"net/http"
 	"strconv"
 
+	_ "github.com/Mininglamp-OSS/octo-fleet/internal/envelope" // swag @Success/@Failure type resolution
+	"github.com/Mininglamp-OSS/octo-fleet/internal/errcode"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
 	"go.uber.org/zap"
 )
@@ -62,10 +62,10 @@ func toFetchResponse(m *botModel) botProvisionFetchResponse {
 	}
 }
 
-// GET /v1/daemon/bot-provisions/:command_id?runtime_id=N
+// GET /v1/bots/{bot_id}/provision?runtime_id=N
 //
-// :command_id 即 bot.id (跟老 heartbeat buildPendingBotProvision 的
-// `id` 字段一致, daemon 端 handleBotProvision 已知道这个 shape).
+// :bot_id（== 原 command_id == bot.id，与 heartbeat buildPendingBotProvision
+// 的 `id` 字段一致，daemon 端 handleBotProvision 已知道这个 shape）。
 //
 // runtime 绑定 (Jerry-Xin fleet#44 blocking): api_key 只绑 (owner, space),
 // fleet 单凭 key 区分不出 caller 是哪台 daemon/runtime. 仅校验 owner+space
@@ -75,21 +75,38 @@ func toFetchResponse(m *botModel) botProvisionFetchResponse {
 // 自报 runtime_id (订阅 SSE 时本就带了), 验它归 caller 所有 (同 sseEvents
 // 的 A7 gate), 且 bot.runtime_id 必须等于它. claim UPDATE 也带 runtime_id
 // 约束, 跟 claimPendingBotProvision 对齐.
+//
+// fetchBotProvision godoc
+// @Summary      Fetch bot provision payload
+// @Description  Daemon fetches the full bot.provision payload (workspace_id, bot_uid, claim_token; never bot_token) and atomically claims it (bot_minted->dispatched). Idempotent while dispatched; 409 once active/archived.
+// @Tags         bot
+// @ID           bot.provision.get
+// @Accept       json
+// @Produce      json
+// @Security     Bearer
+// @Param        bot_id path int true "Bot ID (== provision command id)"
+// @Param        runtime_id query int true "Caller's runtime ID (ownership-bound)"
+// @Success      200 {object} envelope.Data[botProvisionFetchResponse] "provision payload"
+// @Failure      400 {object} envelope.Error "VALIDATION_ERROR"
+// @Failure      401 {object} envelope.Error "AUTH_REQUIRED"
+// @Failure      403 {object} envelope.Error "FORBIDDEN"
+// @Failure      409 {object} envelope.Error "CONFLICT: not provisionable"
+// @Router       /bots/{bot_id}/provision [get]
 func (rt *Runtime) fetchBotProvision(c *wkhttp.Context) {
 	ownerUID := c.MustGet("uid").(string)
 	spaceID := c.MustGet("space_id").(string)
 
-	idStr := c.Param("command_id")
+	idStr := c.Param("bot_id")
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil || id <= 0 {
-		c.ResponseError(errors.New("invalid command_id"))
+		responseError(c, errcode.Validation)
 		return
 	}
 
 	runtimeIDStr := c.Query("runtime_id")
 	runtimeID, err := strconv.ParseInt(runtimeIDStr, 10, 64)
 	if err != nil || runtimeID <= 0 {
-		c.ResponseError(errors.New("invalid runtime_id"))
+		responseError(c, errcode.Validation)
 		return
 	}
 
@@ -99,24 +116,24 @@ func (rt *Runtime) fetchBotProvision(c *wkhttp.Context) {
 	own, err := rt.db.queryByID(runtimeID)
 	if err != nil {
 		rt.Error("fetchBotProvision: query runtime by id", zap.Error(err), zap.Int64("runtime_id", runtimeID))
-		c.ResponseErrorWithStatus(errors.New("internal error"), http.StatusInternalServerError)
+		responseError(c, errcode.InternalError)
 		return
 	}
 	if own == nil || own.OwnerUID != ownerUID || own.SpaceID != spaceID {
-		c.ResponseErrorWithStatus(errors.New("not found or no permission"), http.StatusForbidden)
+		responseError(c, errcode.Forbidden)
 		return
 	}
 
 	row, err := rt.db.queryBotByID(id)
 	if err != nil {
 		rt.Error("fetchBotProvision: queryBotByID", zap.Error(err), zap.Int64("id", id))
-		c.ResponseErrorWithStatus(errors.New("internal error"), http.StatusInternalServerError)
+		responseError(c, errcode.InternalError)
 		return
 	}
 	// ownership + routing gate: 不分 not-found vs forbidden, 防 enumeration.
 	// row.RuntimeID != runtimeID 即"这个 bot 不归来取的这台 daemon" — 拒绝.
 	if row == nil || row.OwnerUID != ownerUID || row.SpaceID != spaceID || row.RuntimeID != runtimeID {
-		c.ResponseErrorWithStatus(errors.New("not found or no permission"), http.StatusForbidden)
+		responseError(c, errcode.Forbidden)
 		return
 	}
 
@@ -152,7 +169,7 @@ func (rt *Runtime) respondBotProvisionByStatus(c *wkhttp.Context, id, runtimeID 
 		).Exec()
 		if uerr != nil {
 			rt.Error("fetchBotProvision: claim update", zap.Error(uerr), zap.Int64("id", id))
-			c.ResponseErrorWithStatus(errors.New("claim failed"), http.StatusInternalServerError)
+			responseError(c, errcode.InternalError)
 			return
 		}
 		affected, _ := result.RowsAffected()
@@ -162,16 +179,13 @@ func (rt *Runtime) respondBotProvisionByStatus(c *wkhttp.Context, id, runtimeID 
 			newRow, qerr := rt.db.queryBotByID(id)
 			if qerr != nil || newRow == nil {
 				rt.Error("fetchBotProvision: re-query after race", zap.Error(qerr), zap.Int64("id", id))
-				c.ResponseErrorWithStatus(errors.New("internal error"), http.StatusInternalServerError)
+				responseError(c, errcode.InternalError)
 				return
 			}
 			// 防无限递归: 如果 re-query 后仍是 bot_minted (理论不可能因为我们刚
 			// 才 UPDATE failed 意味着别人改了状态), 仍按 default 返 410.
 			if newRow.Status == botStatusBotMinted {
-				c.ResponseErrorWithStatus(
-					errors.New("unexpected: bot still bot_minted after claim race"),
-					http.StatusConflict,
-				)
+				responseError(c, errcode.Conflict)
 				return
 			}
 			rt.respondBotProvisionByStatus(c, id, runtimeID, newRow)
@@ -179,19 +193,17 @@ func (rt *Runtime) respondBotProvisionByStatus(c *wkhttp.Context, id, runtimeID 
 		}
 		row.Status = botStatusDispatched
 		row.ClaimToken = token
-		c.Response(toFetchResponse(row))
+		ResponseData(c, toFetchResponse(row))
 
 	case botStatusDispatched:
 		// 幂等 — daemon 重 fetch (本地状态丢 / SSE replay 重复推).
 		// claim_token 已存 row, 同 payload 返回, daemon 继续 ack 流程.
-		c.Response(toFetchResponse(row))
+		ResponseData(c, toFetchResponse(row))
 
 	default:
-		// active / archived / draft / failed — 不应该 fetch 到, 用 410
-		// 让 daemon 端 dedup 丢弃这个 event.
-		c.ResponseErrorWithStatus(
-			errors.New("bot is not provisionable (status="+row.Status+")"),
-			http.StatusGone,
-		)
+		// active / archived / draft / failed — 不应该 fetch 到. 原本用 410
+		// Gone 让 daemon 端 dedup 丢弃; 12-enum 无 410, 用 Conflict (非可
+		// provision 状态) 最贴近, daemon 仍按非 2xx dedup-drop.
+		responseError(c, errcode.Conflict)
 	}
 }

@@ -68,8 +68,8 @@ func TestAckBot_RoutesThroughAtomicGuardRegressionNet(t *testing.T) {
 			"current-status / claim_token guard, so it cannot prevent replay.\n\nbody:\n%s", body)
 	}
 	// a zero-row result must reserve 409 for a genuine conflict.
-	if !strings.Contains(body, "http.StatusConflict") {
-		t.Errorf("ackBot must return 409 Conflict when a zero-row ack is a genuine "+
+	if !strings.Contains(body, "errcode.Conflict") {
+		t.Errorf("ackBot must return 409 Conflict (errcode.Conflict) when a zero-row ack is a genuine "+
 			"state conflict (archived / terminal / token rotated).\n\nbody:\n%s", body)
 	}
 }
@@ -88,10 +88,10 @@ func TestAckBot_IdempotentReplayReturnsOKRegressionNet(t *testing.T) {
 		t.Errorf("ackBot must re-query bot status in the zero-rows branch to "+
 			"distinguish an idempotent replay from a real conflict.\n\nbody:\n%s", body)
 	}
-	// The idempotent branch returns OK (one more ResponseOK than the single
+	// The idempotent branch returns OK (one more ResponseEmpty than the single
 	// terminal one), so the replaying daemon can mark the command done.
-	if strings.Count(body, "ResponseOK") < 2 {
-		t.Errorf("ackBot must return OK when a replayed ack finds the bot already "+
+	if strings.Count(body, "ResponseEmpty") < 2 {
+		t.Errorf("ackBot must return OK (ResponseEmpty) when a replayed ack finds the bot already "+
 			"in the requested status, not only 409.\n\nbody:\n%s", body)
 	}
 }
