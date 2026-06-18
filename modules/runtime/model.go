@@ -151,6 +151,9 @@ type pendingUpgradeCmd struct {
 }
 
 // botProvisionCmd is the heartbeat-piggybacked bot.provision command.
+// Like botProvisionFetchResponse it intentionally OMITS bot_token — the
+// token stays on octo-server and the daemon fetches it separately
+// (GET /v1/bot/:uid/token). Fleet never puts the token on the wire.
 type botProvisionCmd struct {
 	ID          int64  `json:"id"`
 	Action      string `json:"action"`
@@ -158,7 +161,6 @@ type botProvisionCmd struct {
 	WorkspaceID string `json:"workspace_id"`
 	DisplayName string `json:"display_name"`
 	BotUID      string `json:"bot_uid"`
-	BotToken    string `json:"bot_token"`
 	ClaimToken  string `json:"claim_token"`
 }
 

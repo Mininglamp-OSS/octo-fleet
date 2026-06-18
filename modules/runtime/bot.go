@@ -735,7 +735,6 @@ func (rt *Runtime) buildPendingBotProvision(m *botModel) *botProvisionCmd {
 		WorkspaceID: m.WorkspaceID,
 		DisplayName: m.Name,
 		BotUID:      m.BotUID,
-		BotToken:    m.BotToken,
 		ClaimToken:  m.ClaimToken,
 	}
 }

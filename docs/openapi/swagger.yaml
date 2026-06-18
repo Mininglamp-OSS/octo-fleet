@@ -132,8 +132,6 @@ components:
       properties:
         action:
           type: string
-        bot_token:
-          type: string
         bot_uid:
           type: string
         claim_token:
