@@ -26,18 +26,21 @@ type Runtime struct {
 	eventDB   eventLogDB
 	sseHub    *sseHub
 	providers *providerRegistry
+	ccSecrets *ccOctoSecretStore
 }
 
 func New(ctx *config.Context) *Runtime {
 	rt := &Runtime{
-		ctx:     ctx,
-		Log:     log.NewTLog("Runtime"),
-		db:      *newRuntimeDB(ctx),
-		eventDB: *newEventLogDB(ctx),
-		sseHub:  newSseHub(),
+		ctx:       ctx,
+		Log:       log.NewTLog("Runtime"),
+		db:        *newRuntimeDB(ctx),
+		eventDB:   *newEventLogDB(ctx),
+		sseHub:    newSseHub(),
+		ccSecrets: newCcOctoSecretStore(),
 	}
 	rt.providers = newProviderRegistry(&rt.db)
-	go rt.providers.refreshLoop()
+	rt.ccSecrets.startSweeper()
+	rt.providers.refreshLoop()
 
 	go rt.runSweeper()
 	go rt.runEventLogSweeper()
