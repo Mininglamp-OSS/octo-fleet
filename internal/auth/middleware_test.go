@@ -178,12 +178,13 @@ func newCtxMockSrv(spaces []string) *mockSrv {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/auth/verify", func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&m.userCalls, 1)
-		// Confirm middleware passed ?include=context (else the new fields
-		// would be wasted upstream work).
-		if r.URL.Query().Get("include") != "context" {
-			http.Error(w, "missing include=context", http.StatusBadRequest)
-			return
-		}
+		// Post-SDK contract (octo-auth/sdk-go): include flag travels in
+		// the request body, not as a URL query. The SDK sends
+		// {"token":"...","include":["context"]} and the server honors
+		// the body. Pre-SDK fleet middleware sent ?include=context in
+		// the URL; the new mock no longer enforces that — it just
+		// returns context-aware fields unconditionally so the wrapper's
+		// fail-closed paths get exercised.
 		_ = json.NewEncoder(w).Encode(verifyTokenResp{
 			UID:             "u_session",
 			Name:            "User",
