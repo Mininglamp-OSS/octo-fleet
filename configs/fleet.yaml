@@ -20,7 +20,10 @@ external:
 
 # server's base URL — fleet calls /v1/auth/verify-* to authenticate
 # user / bot / api_key callers (合并 plan 决策一+二 Phase 4).
-# Old field auth.serverJwksURL still works as fallback.
+# Note: the historical `auth.serverJwksURL` fallback was removed in
+# PR-C2 of the octo-auth integration epic (#48). Deployments must set
+# `auth.octoServerURL` directly; if omitted, fleet falls back to the
+# localhost default below and any real-server traffic fails loudly.
 auth:
   octoServerURL: "http://localhost:8090"
 
