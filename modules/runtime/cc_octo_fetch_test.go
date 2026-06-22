@@ -23,6 +23,7 @@ func TestFetchCcOctoConfig_HasOwnershipGate(t *testing.T) {
 		`errcode.Forbidden`,       // gate rejection path
 		`errcode.NotFound`,        // 普通 upgrade 无 secret → 404 (daemon 走普通 upgrade)
 		`errcode.Conflict`,        // install 缺 secret / 终态 task → 409 (daemon report failed)
+		`errcode.InternalError`,   // DB error must be retryable, not collapsed into NotFound
 	} {
 		if !strings.Contains(body, must) {
 			t.Errorf("fetchCcOctoConfig missing required gate/element: %s", must)

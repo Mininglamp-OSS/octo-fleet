@@ -63,7 +63,12 @@ func (rt *Runtime) fetchCcOctoConfig(c *wkhttp.Context) {
 		`SELECT id, space_id, daemon_id, owner_uid, component, from_version, COALESCE(metadata,'') as metadata, status
 		 FROM runtime_upgrade_task WHERE id=?`, taskID,
 	).Load(&task)
-	if err != nil || task.ID == "" {
+	if err != nil {
+		rt.Error("fetchCcOctoConfig: load task", zap.Error(err), zap.String("task_id", taskID))
+		responseError(c, errcode.InternalError)
+		return
+	}
+	if task.ID == "" {
 		responseError(c, errcode.NotFound)
 		return
 	}
