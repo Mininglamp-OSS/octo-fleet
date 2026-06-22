@@ -82,8 +82,12 @@ type registeredRuntimeResp struct {
 type upgradeInitReq struct {
 	DaemonID  string `json:"daemon_id"`
 	SpaceID   string `json:"space_id"`
-	Component string `json:"component"`            // 默认 "octo-daemon"；插件填 "octo"
-	RuntimeID int64  `json:"runtime_id,omitempty"` // 插件分支必填：对应 openclaw runtime 的 id
+	Component string `json:"component"`            // 默认 "octo-daemon"；插件填 "octo" / "cc-octo"
+	RuntimeID int64  `json:"runtime_id,omitempty"` // 插件分支必填：对应 runtime 的 id
+	// cc-octo 一键安装专用：LLM 网关 + key。仅在 cc-octo install 时必填。
+	// 绝不入库 / 不进 metadata —— 受理后只进内存 transient store 中转给 daemon。
+	GatewayURL string `json:"gateway_url,omitempty"`
+	APIKey     string `json:"api_key,omitempty"`
 }
 
 type upgradeReportReq struct {
@@ -187,10 +191,11 @@ type heartbeatResp struct {
 
 // versionHint flags an available update for one runtime (per runtime_id).
 type versionHint struct {
-	HasUpdate           bool   `json:"has_update,omitempty"`
-	LatestVersion       string `json:"latest_version,omitempty"`
-	PluginHasUpdate     bool   `json:"has_plugin_update,omitempty"`
-	PluginLatestVersion string `json:"plugin_latest_version,omitempty"`
+	HasUpdate            bool   `json:"has_update,omitempty"`
+	LatestVersion        string `json:"latest_version,omitempty"`
+	PluginHasUpdate      bool   `json:"has_plugin_update,omitempty"`
+	PluginLatestVersion  string `json:"plugin_latest_version,omitempty"`
+	PluginInstallVersion string `json:"plugin_install_version,omitempty"` // set only when the provider's adapter plugin is NOT installed but a latest version is published; lets the UI gate one-click install
 }
 
 // daemonVersionHint flags an available daemon (CLI) update (per daemon_id).

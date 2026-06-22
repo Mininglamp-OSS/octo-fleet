@@ -26,17 +26,20 @@ type Runtime struct {
 	eventDB   eventLogDB
 	sseHub    *sseHub
 	providers *providerRegistry
+	ccSecrets *ccOctoSecretStore
 }
 
 func New(ctx *config.Context) *Runtime {
 	rt := &Runtime{
-		ctx:     ctx,
-		Log:     log.NewTLog("Runtime"),
-		db:      *newRuntimeDB(ctx),
-		eventDB: *newEventLogDB(ctx),
-		sseHub:  newSseHub(),
+		ctx:       ctx,
+		Log:       log.NewTLog("Runtime"),
+		db:        *newRuntimeDB(ctx),
+		eventDB:   *newEventLogDB(ctx),
+		sseHub:    newSseHub(),
+		ccSecrets: newCcOctoSecretStore(),
 	}
 	rt.providers = newProviderRegistry(&rt.db)
+	rt.ccSecrets.startSweeper()
 	go rt.providers.refreshLoop()
 
 	go rt.runSweeper()
@@ -65,8 +68,9 @@ func (rt *Runtime) Route(r *wkhttp.WKHttp) {
 		daemon.POST("/runtimes/:runtime_id/heartbeat", rt.heartbeat) // liveness + pull pending commands
 		daemon.POST("/runtimes/_deregister", rt.deregister)          // batch mark offline
 		daemon.GET("/runtimes/:runtime_id/events", rt.sseEvents)     // per-runtime SSE reverse-dispatch stream
-		daemon.GET("/bots/:bot_id/provision", rt.fetchBotProvision)  // fetch full bot.provision payload
-		daemon.POST("/bots/:bot_id/ack", rt.ackBot)                  // ack provision result
+		daemon.GET("/bots/:bot_id/provision", rt.fetchBotProvision)            // fetch full bot.provision payload
+		daemon.GET("/upgrades/:task_id/cc-octo-config", rt.fetchCcOctoConfig)  // cc-octo install: fetch gateway+key out of band
+		daemon.POST("/bots/:bot_id/ack", rt.ackBot)                            // ack provision result
 		daemon.GET("/providers", rt.listProviders)                   // active runtime-provider catalog
 		daemon.POST("/upgrades/:task_id/report", rt.upgradeReport)   // report upgrade progress
 	}
@@ -201,7 +205,13 @@ func (rt *Runtime) register(c *wkhttp.Context) {
 		// collision can't complete the wrong owner's upgrade task.
 		for _, p := range r.Plugins {
 			if p.Name != "" && p.Version != "" {
-				rt.db.completeUpgradeIfMatchedWithRuntime(req.DaemonID, spaceID, ownerUID, p.Name, p.Version, id)
+				completedIDs := rt.db.completeUpgradeIfMatchedWithRuntime(req.DaemonID, spaceID, ownerUID, p.Name, p.Version, id)
+				// cc-octo install secret 用完即清：关单成功后立即驱逐（TTL 是兜底）
+				if p.Name == componentCcOcto {
+					for _, taskID := range completedIDs {
+						rt.ccSecrets.evict(taskID)
+					}
+				}
 			}
 		}
 
@@ -552,6 +562,17 @@ func (rt *Runtime) list(c *wkhttp.Context) {
 				hint.PluginHasUpdate = true
 				hint.PluginLatestVersion = pluginLatest
 				hasHint = true
+			}
+
+			// Advertise installable version when the provider's adapter plugin
+			// is NOT installed but a latest version is published.
+			if comp, ok := expectedPluginComponent(r.Provider); ok {
+				if !pluginInstalledInMeta(r.Metadata, comp) {
+					if installVer := latestVersions[comp]; installVer != "" {
+						hint.PluginInstallVersion = installVer
+						hasHint = true
+					}
+				}
 			}
 
 			if hasHint {
