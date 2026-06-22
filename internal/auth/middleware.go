@@ -48,43 +48,6 @@ const (
 	botTokenPrefix  = "bf_"
 )
 
-// --- legacy response types retained for test fixture compatibility ---
-//
-// These shapes are what the in-tree mockSrv in middleware_test.go
-// constructs JSON bodies from. The JSON tags match the SDK contract
-// types 1:1 so the SDK's json decoder accepts them. The fleet
-// middleware itself reads through SDK contract types now.
-
-type ownedBot struct {
-	UID  string `json:"uid"`
-	Name string `json:"name"`
-}
-
-type verifyTokenResp struct {
-	UID              string              `json:"uid"`
-	Name             string              `json:"name"`
-	Role             string              `json:"role"`
-	OwnedBots        []ownedBot          `json:"owned_bots"`
-	ContextIncluded  bool                `json:"context_included"`
-	Spaces           []string            `json:"spaces,omitempty"`
-	OwnedBotsBySpace map[string][]string `json:"owned_bots_by_space,omitempty"`
-}
-
-type verifyBotResp struct {
-	BotUID    string `json:"bot_uid"`
-	BotName   string `json:"bot_name"`
-	OwnerUID  string `json:"owner_uid"`
-	OwnerName string `json:"owner_name"`
-	SpaceID   string `json:"space_id"`
-}
-
-type verifyAPIKeyResp struct {
-	UID              string              `json:"uid"`
-	SpaceID          string              `json:"space_id"`
-	OwnedBotsBySpace map[string][]string `json:"owned_bots_by_space,omitempty"`
-	ContextIncluded  bool                `json:"context_included"`
-}
-
 // abortErr writes a fleet-style errcode envelope. The envelope shape
 // is `{"error":{"code":..., "message":...}}` per the project R2
 // contract (Jerry-Xin / mochashanyao P0 review on #50: the pre-fix
