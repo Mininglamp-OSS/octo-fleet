@@ -87,13 +87,13 @@ func (rt *Runtime) fetchCcOctoConfig(c *wkhttp.Context) {
 		return
 	}
 
-	// 状态校验：只有 in-flight task 可 fetch。终态(completed/failed/timeout)→ 409,
-	// daemon 不应再处理(且 secret 该已被 sweeper/TTL 回收)。
+	// 状态校验：只有 in-flight task 可 fetch。终态(completed/failed/timeout)→ 410,
+	// daemon 标记为 stale 不再处理(且 secret 该已被 sweeper/TTL 回收)。
 	switch task.Status {
 	case "pending", "dispatched", "installing":
 		// in-flight, ok
 	default:
-		responseError(c, errcode.Conflict)
+		responseError(c, errcode.Gone)
 		return
 	}
 

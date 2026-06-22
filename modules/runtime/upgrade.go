@@ -315,6 +315,10 @@ func (rt *Runtime) createPluginUpgradeTask(c *wkhttp.Context, loginUID string, r
 				responseError(c, errcode.Validation)
 				return
 			}
+			if !isAllowedGatewayURL(req.GatewayURL) {
+				responseError(c, errcode.Validation)
+				return
+			}
 		default:
 			responseError(c, errcode.Validation)
 			return

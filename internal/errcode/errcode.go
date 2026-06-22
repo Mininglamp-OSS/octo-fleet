@@ -38,4 +38,5 @@ var (
 	RateLimited          = Code{"RATE_LIMITED", http.StatusTooManyRequests, "Too many requests.", false}
 	InternalError        = Code{"INTERNAL_ERROR", http.StatusInternalServerError, "Internal error.", true}
 	UpstreamUnavailable  = Code{"UPSTREAM_UNAVAILABLE", http.StatusServiceUnavailable, "Upstream unavailable.", true}
+	Gone                 = Code{"GONE", http.StatusGone, "Resource gone.", false}
 )

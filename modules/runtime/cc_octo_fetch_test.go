@@ -22,7 +22,8 @@ func TestFetchCcOctoConfig_HasOwnershipGate(t *testing.T) {
 		`from_version`,            // 必须选出 from_version 以区分 install vs 普通 upgrade
 		`errcode.Forbidden`,       // gate rejection path
 		`errcode.NotFound`,        // 普通 upgrade 无 secret → 404 (daemon 走普通 upgrade)
-		`errcode.Conflict`,        // install 缺 secret / 终态 task → 409 (daemon report failed)
+		`errcode.Conflict`,        // install 缺 secret → 409 (daemon report failed)
+		`errcode.Gone`,            // 终态 task → 410 (stale, daemon mark done)
 		`errcode.InternalError`,   // DB error must be retryable, not collapsed into NotFound
 	} {
 		if !strings.Contains(body, must) {
