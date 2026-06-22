@@ -609,9 +609,9 @@ func (rt *Runtime) upgradeReport(c *wkhttp.Context) {
 		return
 	}
 
-	// cc-octo install secret 用完即清:终态 report(completed/failed)后驱逐
-	// 中转的 secret(TTL 是兜底,这里是即时回收)。
-	if task.Component == componentCcOcto && (req.Status == "failed") {
+	// cc-octo install secret 用完即清：failed 终态 report 后驱逐；
+	// completed 关单由 register/close-out 路径处理（见 api.go 中 completeUpgradeIfMatchedWithRuntime 调用方），TTL 是兜底。
+	if task.Component == componentCcOcto && req.Status == "failed" {
 		rt.ccSecrets.evict(taskID)
 	}
 	ResponseEmpty(c)
@@ -722,8 +722,11 @@ func (d *runtimeDB) completeUpgradeIfMatched(daemonID, spaceID, ownerUID, compon
 // v3.3.1 §C.2: same (space, owner) scoping as completeUpgradeIfMatched —
 // the candidates SELECT is the cross-owner leak vector under the
 // post-§4.4 schema, not just the final UPDATE.
-func (d *runtimeDB) completeUpgradeIfMatchedWithRuntime(daemonID, spaceID, ownerUID, component, actualVersion string, runtimeID int64) {
+//
+// 返回被关单的任务 ID 列表，供调用方做后续处理（如驱逐 cc-octo install secret）。
+func (d *runtimeDB) completeUpgradeIfMatchedWithRuntime(daemonID, spaceID, ownerUID, component, actualVersion string, runtimeID int64) []string {
 	var candidates []upgradeTask
+	var completedIDs []string
 	// F-3 (lml2468 review): 加 'pending' 对称 R3, 跟 completeUpgradeIfMatched 同理由.
 	_, err := d.session.SelectBySql(
 		`SELECT id, space_id, daemon_id, owner_uid, component, from_version, to_version, download_url, checksum, COALESCE(metadata,'') as metadata, status
@@ -733,7 +736,7 @@ func (d *runtimeDB) completeUpgradeIfMatchedWithRuntime(daemonID, spaceID, owner
 		daemonID, spaceID, ownerUID, component,
 	).Load(&candidates)
 	if err != nil {
-		return
+		return completedIDs
 	}
 	for _, t := range candidates {
 		// runtime_id 归属校验
@@ -750,11 +753,15 @@ func (d *runtimeDB) completeUpgradeIfMatchedWithRuntime(daemonID, spaceID, owner
 		if actualVersion != t.ToVersion && !isVersionOlder(t.ToVersion, actualVersion) {
 			continue
 		}
-		d.session.UpdateBySql(
+		_, err := d.session.UpdateBySql(
 			`UPDATE runtime_upgrade_task SET status='completed', updated_at=NOW() WHERE id=?`,
 			t.ID,
 		).Exec()
+		if err == nil {
+			completedIDs = append(completedIDs, t.ID)
+		}
 	}
+	return completedIDs
 }
 
 // sweeper：按 component 差异化 timeout。activeProviders 来自 provider registry。

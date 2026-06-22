@@ -205,7 +205,13 @@ func (rt *Runtime) register(c *wkhttp.Context) {
 		// collision can't complete the wrong owner's upgrade task.
 		for _, p := range r.Plugins {
 			if p.Name != "" && p.Version != "" {
-				rt.db.completeUpgradeIfMatchedWithRuntime(req.DaemonID, spaceID, ownerUID, p.Name, p.Version, id)
+				completedIDs := rt.db.completeUpgradeIfMatchedWithRuntime(req.DaemonID, spaceID, ownerUID, p.Name, p.Version, id)
+				// cc-octo install secret 用完即清：关单成功后立即驱逐（TTL 是兜底）
+				if p.Name == componentCcOcto {
+					for _, taskID := range completedIDs {
+						rt.ccSecrets.evict(taskID)
+					}
+				}
 			}
 		}
 
