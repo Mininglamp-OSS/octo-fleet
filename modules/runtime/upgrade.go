@@ -301,12 +301,24 @@ func (rt *Runtime) createPluginUpgradeTask(c *wkhttp.Context, loginUID string, r
 			break
 		}
 	}
-	// fromVersion == "" 表示该插件尚未安装。仅 openclaw 的 octo 适配插件(componentPlugin)
-	// 支持一键安装(install 到 latest);cc-octo 等其它插件未安装仍拒绝 —— 其安装需用户
-	// 提供 LLM 网关/key 等额外配置,另行支持。
-	if fromVersion == "" && component != componentPlugin {
-		responseError(c, errcode.Validation)
-		return
+	// fromVersion == "" 表示该插件尚未安装(install)。
+	//   - openclaw 的 octo 适配插件(componentPlugin): 一键 install 到 latest,无需额外配置。
+	//   - cc-octo: 一键 install 需用户提供 LLM 网关 url + key(随请求带 gateway_url/api_key);
+	//     缺任一则拒绝。secret 不入库,受理后进内存 transient store 中转给 daemon。
+	isInstall := fromVersion == ""
+	if isInstall {
+		switch component {
+		case componentPlugin:
+			// ok, no secret needed
+		case componentCcOcto:
+			if req.GatewayURL == "" || req.APIKey == "" {
+				responseError(c, errcode.Validation)
+				return
+			}
+		default:
+			responseError(c, errcode.Validation)
+			return
+		}
 	}
 
 	// 查最新版本
@@ -337,6 +349,10 @@ func (rt *Runtime) createPluginUpgradeTask(c *wkhttp.Context, loginUID string, r
 		"runtime_id": req.RuntimeID,
 	})
 
+	var ccSecret *ccOctoSecret
+	if component == componentCcOcto && isInstall {
+		ccSecret = &ccOctoSecret{GatewayURL: req.GatewayURL, APIKey: req.APIKey}
+	}
 	rt.insertUpgradeTask(c, insertTaskArgs{
 		SpaceID:     req.SpaceID,
 		DaemonID:    req.DaemonID,
@@ -348,6 +364,7 @@ func (rt *Runtime) createPluginUpgradeTask(c *wkhttp.Context, loginUID string, r
 		Checksum:    "",
 		Metadata:    string(taskMeta),
 		RuntimeID:   req.RuntimeID,
+		CcSecret:    ccSecret,
 	})
 }
 
@@ -365,6 +382,9 @@ type insertTaskArgs struct {
 	// daemon 自身 upgrade 留 0 (dispatcher 走 firstRuntimeIDForDaemon
 	// fallback). 仅用于 SSE push target, 不写 runtime_upgrade_task 表.
 	RuntimeID int64
+	// CcSecret: cc-octo 一键安装的 LLM 网关+key。非 nil 时,insertUpgradeTask 在
+	// SSE dispatch 之前存进内存 transient store(绝不入库/不进 metadata)。
+	CcSecret *ccOctoSecret
 }
 
 // 互斥：同 daemon_id 只允许一个 in-progress 任务（无论 component）
@@ -440,6 +460,12 @@ func (rt *Runtime) insertUpgradeTask(c *wkhttp.Context, args insertTaskArgs) {
 		rt.Error("commit upgrade task", zap.Error(err), zap.String("task_id", taskID))
 		responseError(c, errcode.InternalError)
 		return
+	}
+
+	// cc-octo install secret 必须在 dispatch 之前入 store —— dispatchUpgrade 会
+	// 唤醒 daemon 立刻来 fetch,晚于此即 404 竞态。secret 不持久化,只内存中转。
+	if args.CcSecret != nil {
+		rt.ccSecrets.put(taskID, *args.CcSecret)
 	}
 
 	// 决策三 SSE 反向派发 (Phase A 双跑): component/plugin upgrade 已知
@@ -581,6 +607,12 @@ func (rt *Runtime) upgradeReport(c *wkhttp.Context) {
 	if rows, _ := result.RowsAffected(); rows == 0 {
 		responseError(c, errcode.Conflict)
 		return
+	}
+
+	// cc-octo install secret 用完即清:终态 report(completed/failed)后驱逐
+	// 中转的 secret(TTL 是兜底,这里是即时回收)。
+	if task.Component == componentCcOcto && (req.Status == "failed") {
+		rt.ccSecrets.evict(taskID)
 	}
 	ResponseEmpty(c)
 }

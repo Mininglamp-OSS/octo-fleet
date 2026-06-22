@@ -1,21 +1,66 @@
 package runtime
 
 import (
+	"os"
 	"regexp"
+	"strings"
 	"testing"
 )
 
 // octo(openclaw 的 octo 适配插件)未安装时,createPluginUpgradeTask 必须按 install
-// 受理(不无条件 400);但 cc-octo 未安装仍须 400(其安装需用户提供 LLM 网关/key 等
-// 额外配置,另行支持)。锁住"空版本守卫已 scope 到非 componentPlugin",防退化成
-// blanket 400(阻断 octo 一键安装)或 blanket 放行(误开 cc-octo install)。
+// 受理(不无条件 400);cc-octo 未安装需用户提供 LLM 网关/key 才放行。锁住"空版本守卫
+// 已 switch 到 per-component install",防退化 blanket 400 或 blanket 放行。
 func TestCreatePluginUpgradeTask_InstallScopedToOcto(t *testing.T) {
-	src := mustReadSource(t, "upgrade.go")
-	body := extractFuncBody(t, src, "createPluginUpgradeTask")
+	src, err := os.ReadFile("upgrade.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(src)
+	// 旧的一刀切 guard 必须已移除。
+	if strings.Contains(body, `fromVersion == "" && component != componentPlugin`) {
+		t.Error("old blanket install guard still present; must be the per-component install switch")
+	}
+	// 新 guard:install 分流必须显式处理 componentPlugin 与 componentCcOcto。
+	if !strings.Contains(body, "isInstall := fromVersion ==") {
+		t.Error("install must be detected via empty fromVersion (isInstall)")
+	}
+	if !regexp.MustCompile(`case componentCcOcto:`).MatchString(body) {
+		t.Error("install switch must handle componentCcOcto (needs secret) explicitly")
+	}
+}
 
-	scoped := regexp.MustCompile(`fromVersion\s*==\s*""\s*&&\s*component\s*!=\s*componentPlugin`)
-	if !scoped.MatchString(body) {
-		t.Fatalf("createPluginUpgradeTask 的空版本守卫未 scope 到 componentPlugin —— 要么 blanket 400 阻断 octo 安装,要么 blanket 放行误开 cc-octo install")
+// cc-octo install 必须放开空 fromVersion，且 secret 经 insertTaskArgs.CcSecret 传入,
+// insertUpgradeTask 在 SSE dispatch 之前存入 store，绝不进 metadata。
+func TestCreatePluginUpgradeTask_CcOctoInstallNeedsSecret(t *testing.T) {
+	src, err := os.ReadFile("upgrade.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(src)
+
+	// cc-octo install 缺 secret 必须拒绝(校验 GatewayURL/APIKey 非空)。
+	if !regexp.MustCompile(`req\.GatewayURL == "" \|\| req\.APIKey == ""`).MatchString(body) {
+		t.Error("cc-octo install must reject empty gateway_url/api_key")
+	}
+	// secret 通过 insertTaskArgs.CcSecret 传入(而非 createPluginUpgradeTask 末尾
+	// 在 insertUpgradeTask 返回后再 put —— 那样 SSE 已先 dispatch，存在 fetch 404 竞态)。
+	if !strings.Contains(body, "CcSecret:") {
+		t.Error("createPluginUpgradeTask must pass the secret via insertTaskArgs.CcSecret")
+	}
+	// put 必须发生在 dispatchUpgrade 之前(同一函数内,put 文本先于 dispatchUpgrade 文本)。
+	putIdx := strings.Index(body, "rt.ccSecrets.put(")
+	dispIdx := strings.Index(body, "rt.dispatchUpgrade(")
+	if putIdx < 0 || dispIdx < 0 || putIdx > dispIdx {
+		t.Error("ccSecrets.put must run before dispatchUpgrade to avoid a fetch-before-store race")
+	}
+	// secret 绝不写进 metadata。检查 taskMeta marshal 块不包含 GatewayURL/APIKey。
+	taskMetaRe := regexp.MustCompile(`taskMeta, _ := json\.Marshal\(map\[string\]interface\{\}\{[^}]+\}`)
+	taskMetaBlocks := taskMetaRe.FindAllString(body, -1)
+	for _, block := range taskMetaBlocks {
+		if strings.Contains(block, "GatewayURL") || strings.Contains(block, "APIKey") {
+			t.Error("install secret must NOT be marshalled into task metadata")
+			break
+		}
 	}
 }
 
