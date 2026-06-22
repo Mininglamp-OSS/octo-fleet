@@ -40,7 +40,7 @@ func New(ctx *config.Context) *Runtime {
 	}
 	rt.providers = newProviderRegistry(&rt.db)
 	rt.ccSecrets.startSweeper()
-	rt.providers.refreshLoop()
+	go rt.providers.refreshLoop()
 
 	go rt.runSweeper()
 	go rt.runEventLogSweeper()
