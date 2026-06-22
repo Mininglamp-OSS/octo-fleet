@@ -564,6 +564,17 @@ func (rt *Runtime) list(c *wkhttp.Context) {
 				hasHint = true
 			}
 
+			// Advertise installable version when the provider's adapter plugin
+			// is NOT installed but a latest version is published.
+			if comp, ok := expectedPluginComponent(r.Provider); ok {
+				if !pluginInstalledInMeta(r.Metadata, comp) {
+					if installVer := latestVersions[comp]; installVer != "" {
+						hint.PluginInstallVersion = installVer
+						hasHint = true
+					}
+				}
+			}
+
 			if hasHint {
 				versionHints[r.ID] = hint
 			}

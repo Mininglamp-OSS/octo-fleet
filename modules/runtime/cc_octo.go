@@ -37,6 +37,26 @@ func validPluginForProvider(component, provider string) bool {
 	return ok && exp == component
 }
 
+// pluginInstalledInMeta reports whether a plugin with the given name exists in
+// the runtime's metadata.plugins array. Mirrors the parse logic in computePluginHint.
+func pluginInstalledInMeta(metadataJSON, name string) bool {
+	if metadataJSON == "" {
+		return false
+	}
+	var meta struct {
+		Plugins []pluginInfo `json:"plugins"`
+	}
+	if json.Unmarshal([]byte(metadataJSON), &meta) != nil {
+		return false
+	}
+	for _, p := range meta.Plugins {
+		if p.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 // computePluginHint decides whether a runtime's octo-adapter plugin has an
 // available update. Pure (no DB) so version-hint logic is unit testable: it
 // picks the expected plugin name for the provider, finds it in the runtime's

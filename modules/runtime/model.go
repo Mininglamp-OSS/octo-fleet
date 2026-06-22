@@ -191,10 +191,11 @@ type heartbeatResp struct {
 
 // versionHint flags an available update for one runtime (per runtime_id).
 type versionHint struct {
-	HasUpdate           bool   `json:"has_update,omitempty"`
-	LatestVersion       string `json:"latest_version,omitempty"`
-	PluginHasUpdate     bool   `json:"has_plugin_update,omitempty"`
-	PluginLatestVersion string `json:"plugin_latest_version,omitempty"`
+	HasUpdate            bool   `json:"has_update,omitempty"`
+	LatestVersion        string `json:"latest_version,omitempty"`
+	PluginHasUpdate      bool   `json:"has_plugin_update,omitempty"`
+	PluginLatestVersion  string `json:"plugin_latest_version,omitempty"`
+	PluginInstallVersion string `json:"plugin_install_version,omitempty"` // set only when the provider's adapter plugin is NOT installed but a latest version is published; lets the UI gate one-click install
 }
 
 // daemonVersionHint flags an available daemon (CLI) update (per daemon_id).

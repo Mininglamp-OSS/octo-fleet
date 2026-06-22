@@ -52,6 +52,29 @@ func TestValidPluginForProvider(t *testing.T) {
 	}
 }
 
+func TestPluginInstalledInMeta(t *testing.T) {
+	cases := []struct {
+		name     string
+		meta     string
+		plugin   string
+		expected bool
+	}{
+		{"cc-octo installed", `{"plugins":[{"name":"cc-octo","version":"1.0.0"}]}`, "cc-octo", true},
+		{"octo installed", `{"plugins":[{"name":"octo","version":"0.6.1"}]}`, "octo", true},
+		{"cc-octo not installed", `{"plugins":[{"name":"octo","version":"0.6.1"}]}`, "cc-octo", false},
+		{"octo not installed", `{"plugins":[{"name":"cc-octo","version":"1.0.0"}]}`, "octo", false},
+		{"empty plugins", `{"plugins":[]}`, "cc-octo", false},
+		{"no plugins key", `{}`, "cc-octo", false},
+		{"invalid json", `not json`, "cc-octo", false},
+		{"empty metadata", "", "cc-octo", false},
+	}
+	for _, tc := range cases {
+		if got := pluginInstalledInMeta(tc.meta, tc.plugin); got != tc.expected {
+			t.Errorf("pluginInstalledInMeta(%q, %q) = %v, want %v", tc.meta, tc.plugin, got, tc.expected)
+		}
+	}
+}
+
 func TestComputePluginHint_CcOctoHasUpdate(t *testing.T) {
 	meta := `{"plugins":[{"name":"cc-octo","version":"1.0.0"}]}`
 	has, ver := computePluginHint("claude", meta, map[string]string{"cc-octo": "1.1.0"})
@@ -87,5 +110,114 @@ func TestComputePluginHint_NoPluginOrNoLatest(t *testing.T) {
 	// unknown provider
 	if has, _ := computePluginHint("codex", `{"plugins":[]}`, map[string]string{"octo": "1.0.0"}); has {
 		t.Error("unknown provider must not report a plugin update")
+	}
+}
+
+// TestInstallVersionHint_ClaudeNotInstalled tests that a claude runtime with
+// no cc-octo plugin + latestVersions{"cc-octo":"1.1.0"} advertises install version.
+func TestInstallVersionHint_ClaudeNotInstalled(t *testing.T) {
+	// Claude runtime without cc-octo installed
+	meta := `{"cli_version":"0.3.0"}`
+	latestVersions := map[string]string{"cc-octo": "1.1.0"}
+
+	comp, ok := expectedPluginComponent("claude")
+	if !ok || comp != componentCcOcto {
+		t.Fatalf("expected cc-octo for claude, got %q (ok=%v)", comp, ok)
+	}
+
+	installed := pluginInstalledInMeta(meta, comp)
+	if installed {
+		t.Fatal("expected cc-octo NOT installed")
+	}
+
+	installVer := latestVersions[comp]
+	if installVer == "" {
+		t.Fatal("expected installable version to exist")
+	}
+
+	if installVer != "1.1.0" {
+		t.Errorf("got install version %q, want 1.1.0", installVer)
+	}
+}
+
+// TestInstallVersionHint_ClaudeInstalled tests that a claude runtime WITH
+// cc-octo installed does NOT advertise PluginInstallVersion.
+func TestInstallVersionHint_ClaudeInstalled(t *testing.T) {
+	// Claude runtime with cc-octo already installed
+	meta := `{"cli_version":"0.3.0","plugins":[{"name":"cc-octo","version":"1.0.0"}]}`
+	latestVersions := map[string]string{"cc-octo": "1.1.0"}
+
+	comp, ok := expectedPluginComponent("claude")
+	if !ok {
+		t.Fatal("expected cc-octo for claude")
+	}
+
+	installed := pluginInstalledInMeta(meta, comp)
+	if !installed {
+		t.Fatal("expected cc-octo to be installed")
+	}
+
+	// When installed, upgrade path is handled by computePluginHint (separate logic)
+	// InstallVersion should be empty — web should gate install button off
+	hasUpdate, latestVer := computePluginHint("claude", meta, latestVersions)
+	if !hasUpdate || latestVer != "1.1.0" {
+		t.Errorf("expected upgrade hint (true, 1.1.0), got (%v, %q)", hasUpdate, latestVer)
+	}
+}
+
+// TestInstallVersionHint_OpenclawSymmetric tests openclaw symmetric behavior.
+func TestInstallVersionHint_OpenclawSymmetric(t *testing.T) {
+	// OpenClaw runtime without octo plugin
+	metaNoOcto := `{"cli_version":"0.3.0"}`
+	latestVersions := map[string]string{"octo": "0.7.0"}
+
+	comp, ok := expectedPluginComponent("openclaw")
+	if !ok || comp != componentPlugin {
+		t.Fatalf("expected octo for openclaw, got %q (ok=%v)", comp, ok)
+	}
+
+	installed := pluginInstalledInMeta(metaNoOcto, comp)
+	if installed {
+		t.Fatal("expected octo NOT installed")
+	}
+
+	installVer := latestVersions[comp]
+	if installVer != "0.7.0" {
+		t.Errorf("got install version %q, want 0.7.0", installVer)
+	}
+
+	// Now with octo installed — install version should be empty
+	metaWithOcto := `{"cli_version":"0.3.0","plugins":[{"name":"octo","version":"0.6.0"}]}`
+	installed = pluginInstalledInMeta(metaWithOcto, comp)
+	if !installed {
+		t.Fatal("expected octo to be installed")
+	}
+
+	// Upgrade path handled by computePluginHint
+	hasUpdate, latestVer := computePluginHint("openclaw", metaWithOcto, latestVersions)
+	if !hasUpdate || latestVer != "0.7.0" {
+		t.Errorf("expected upgrade hint (true, 0.7.0), got (%v, %q)", hasUpdate, latestVer)
+	}
+}
+
+// TestInstallVersionHint_NoLatestAvailable tests that when no latest version
+// is configured, PluginInstallVersion remains empty.
+func TestInstallVersionHint_NoLatestAvailable(t *testing.T) {
+	meta := `{"cli_version":"0.3.0"}`
+	latestVersions := map[string]string{} // no versions configured
+
+	comp, ok := expectedPluginComponent("claude")
+	if !ok {
+		t.Fatal("expected cc-octo for claude")
+	}
+
+	installed := pluginInstalledInMeta(meta, comp)
+	if installed {
+		t.Fatal("expected cc-octo NOT installed")
+	}
+
+	installVer := latestVersions[comp]
+	if installVer != "" {
+		t.Errorf("expected empty install version when not configured, got %q", installVer)
 	}
 }
