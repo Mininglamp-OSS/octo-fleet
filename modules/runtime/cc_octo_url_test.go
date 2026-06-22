@@ -12,6 +12,8 @@ func TestIsAllowedGatewayURL(t *testing.T) {
 	}{
 		{"https allowed", "https://api.example.com/v1", true},
 		{"https no path", "https://example.com", true},
+		{"https 127.0.0.1 rejected", "https://127.0.0.1", false},
+		{"https 10.x rejected", "https://10.1.2.3", false},
 		{"http localhost", "http://localhost:8080", true},
 		{"http 127.0.0.1", "http://127.0.0.1:3000/api", true},
 		{"http localhost no port", "http://localhost", true},

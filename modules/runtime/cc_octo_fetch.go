@@ -25,7 +25,7 @@ type ccOctoConfigResponse struct {
 //   - runtime_id 自报，必须归 caller（queryByID），否则同 owner+space 下
 //     daemon A 可拿别的 runtime 的 task secret
 //   - runtime_id 必须等于 task.metadata 记录的 runtime_id
-//   - task.status 必须 in-flight(pending/dispatched/installing);终态 → 409
+//   - task.status 必须 in-flight(pending/dispatched/installing);终态 → 410 (Gone)
 //   - secret 命中 → 200 {url,key}
 //   - secret 缺失:install task(from_version=="")→ 409(daemon report failed,
 //     不可静默跑无 key 的普通 upgrade);普通 upgrade → 404(daemon 走普通 upgrade)。
@@ -87,7 +87,7 @@ func (rt *Runtime) fetchCcOctoConfig(c *wkhttp.Context) {
 		return
 	}
 
-	// 状态校验：只有 in-flight task 可 fetch。终态(completed/failed/timeout)→ 410,
+	// 状态校验：只有 in-flight task 可 fetch。终态(completed/failed/timeout)→ 410 (Gone),
 	// daemon 标记为 stale 不再处理(且 secret 该已被 sweeper/TTL 回收)。
 	switch task.Status {
 	case "pending", "dispatched", "installing":
