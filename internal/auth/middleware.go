@@ -23,6 +23,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	octoauth "github.com/Mininglamp-OSS/octo-auth/sdk-go/auth"
+	"github.com/Mininglamp-OSS/octo-fleet/internal/envelope"
 	"github.com/Mininglamp-OSS/octo-fleet/internal/errcode"
 )
 
@@ -84,13 +85,18 @@ type verifyAPIKeyResp struct {
 	ContextIncluded  bool                `json:"context_included"`
 }
 
-// abortErr writes a fleet-style errcode envelope (matches existing
-// handler tests' expectations across the codebase).
+// abortErr writes a fleet-style errcode envelope. The envelope shape
+// is `{"error":{"code":..., "message":...}}` per the project R2
+// contract (Jerry-Xin / mochashanyao P0 review on #50: the pre-fix
+// flat `{"code":..., "message":...}` shape regressed every
+// authenticated route's error response and would have broken every
+// client that branches on `error.code` instead of the top-level
+// fields).
 func abortErr(c *gin.Context, code errcode.Code) {
-	c.AbortWithStatusJSON(code.HTTPStatus, gin.H{
-		"code":    code.Code,
-		"message": code.Message,
-	})
+	c.AbortWithStatusJSON(code.HTTPStatus, envelope.Error{Error: envelope.ErrorBody{
+		Code:    code.Code,
+		Message: code.Message,
+	}})
 }
 
 // --- SDK client singleton ---
