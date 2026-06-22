@@ -68,8 +68,9 @@ func (rt *Runtime) Route(r *wkhttp.WKHttp) {
 		daemon.POST("/runtimes/:runtime_id/heartbeat", rt.heartbeat) // liveness + pull pending commands
 		daemon.POST("/runtimes/_deregister", rt.deregister)          // batch mark offline
 		daemon.GET("/runtimes/:runtime_id/events", rt.sseEvents)     // per-runtime SSE reverse-dispatch stream
-		daemon.GET("/bots/:bot_id/provision", rt.fetchBotProvision)  // fetch full bot.provision payload
-		daemon.POST("/bots/:bot_id/ack", rt.ackBot)                  // ack provision result
+		daemon.GET("/bots/:bot_id/provision", rt.fetchBotProvision)            // fetch full bot.provision payload
+		daemon.GET("/upgrades/:task_id/cc-octo-config", rt.fetchCcOctoConfig)  // cc-octo install: fetch gateway+key out of band
+		daemon.POST("/bots/:bot_id/ack", rt.ackBot)                            // ack provision result
 		daemon.GET("/providers", rt.listProviders)                   // active runtime-provider catalog
 		daemon.POST("/upgrades/:task_id/report", rt.upgradeReport)   // report upgrade progress
 	}
