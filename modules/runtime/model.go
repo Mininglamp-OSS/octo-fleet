@@ -88,6 +88,9 @@ type upgradeInitReq struct {
 	// 绝不入库 / 不进 metadata —— 受理后只进内存 transient store 中转给 daemon。
 	GatewayURL string `json:"gateway_url,omitempty"`
 	APIKey     string `json:"api_key,omitempty"`
+	// Optional LLM model id (gateway-level). Relayed like the gateway/key —
+	// never persisted — and passed to cc-channel-octo configure --model.
+	Model string `json:"model,omitempty"`
 }
 
 type upgradeReportReq struct {

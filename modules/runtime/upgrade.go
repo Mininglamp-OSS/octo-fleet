@@ -355,7 +355,7 @@ func (rt *Runtime) createPluginUpgradeTask(c *wkhttp.Context, loginUID string, r
 
 	var ccSecret *ccOctoSecret
 	if component == componentCcOcto && isInstall {
-		ccSecret = &ccOctoSecret{GatewayURL: req.GatewayURL, APIKey: req.APIKey}
+		ccSecret = &ccOctoSecret{GatewayURL: req.GatewayURL, APIKey: req.APIKey, Model: req.Model}
 	}
 	rt.insertUpgradeTask(c, insertTaskArgs{
 		SpaceID:     req.SpaceID,
