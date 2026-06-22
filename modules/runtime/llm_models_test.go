@@ -44,13 +44,14 @@ func TestIsUnsafeIP(t *testing.T) {
 		"0.0.0.0", "::", // unspecified
 		"::ffff:10.0.0.1", // v4-mapped private
 		"64:ff9b::a00:1",  // NAT64-embedded 10.0.0.1
+		"100.64.0.1", "100.127.255.255", // CGNAT 100.64.0.0/10
 	}
 	for _, s := range unsafe {
 		if !isUnsafeIP(net.ParseIP(s)) {
 			t.Errorf("expected unsafe: %s", s)
 		}
 	}
-	for _, s := range []string{"8.8.8.8", "1.1.1.1", "2606:4700::1111"} {
+	for _, s := range []string{"8.8.8.8", "1.1.1.1", "2606:4700::1111", "100.63.255.255", "100.128.0.1"} {
 		if isUnsafeIP(net.ParseIP(s)) {
 			t.Errorf("expected safe: %s", s)
 		}
@@ -110,5 +111,23 @@ func TestFetchLLMModels_RejectsNonHTTPS(t *testing.T) {
 	rt.fetchLLMModels(&wkhttp.Context{Context: ginCtx})
 	if w.Code == http.StatusOK {
 		t.Fatalf("expected non-200 for http gateway, got 200: %s", w.Body.String())
+	}
+}
+
+// Exercises the PRODUCTION path (no injected proxyClient → newSafeProxyClient):
+// an https gateway whose host is a private IP literal passes the cheap
+// validateProxyURL check but must be refused at dial time by the IP gate.
+func TestFetchLLMModels_DefaultClientRejectsPrivateDial(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rt := &Runtime{Log: log.NewTLog("test")} // no proxyClient → default safe client
+	w := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(w)
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/runtimes/llm-models",
+		strings.NewReader(`{"gateway_url":"https://10.0.0.1/v1","api_key":"sk"}`))
+	ginCtx.Request.Header.Set("Content-Type", "application/json")
+
+	rt.fetchLLMModels(&wkhttp.Context{Context: ginCtx})
+	if w.Code == http.StatusOK {
+		t.Fatalf("expected non-200 — dial-time SSRF gate must refuse a private IP: %s", w.Body.String())
 	}
 }

@@ -58,6 +58,12 @@ func isUnsafeIP(ip net.IP) bool {
 		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
 		return true
 	}
+	// 100.64.0.0/10 — CGNAT / RFC6598 shared address space. NOT covered by
+	// net.IP.IsPrivate (which is RFC1918 + ULA only), but it can route to
+	// carrier/cloud internal infra, so reject it explicitly.
+	if len(ip) == net.IPv4len && ip[0] == 100 && ip[1] >= 64 && ip[1] <= 127 {
+		return true
+	}
 	// NAT64 64:ff9b::/96 → unwrap the embedded IPv4 and re-check.
 	if len(ip) == net.IPv6len && ip[0] == 0x00 && ip[1] == 0x64 && ip[2] == 0xff && ip[3] == 0x9b &&
 		ip[4] == 0 && ip[5] == 0 && ip[6] == 0 && ip[7] == 0 &&
