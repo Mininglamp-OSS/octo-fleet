@@ -100,17 +100,18 @@ func main() {
 	// Auth middleware singleton (合并 plan §4): fleet calls server's
 	// verify-* endpoints to authenticate user / bot / api_key callers.
 	// 合并 plan 决策一+二 Phase 4: 改用专用字段 auth.octoServerURL.
-	// 仍 fallback 旧字段 auth.serverJwksURL (反推 base URL) 兼容未更新的
-	// fleet.yaml. **下个发版前删除 serverJwksURL fallback** (运维需保证
-	// fleet.yaml 已更新到 octoServerURL).
+	//
+	// PR-C2 of the octo-auth integration epic removed the legacy
+	// `auth.serverJwksURL` fallback (the pre-Phase-4 JWT/JWKS field
+	// fleet temporarily kept reading to ease the rolling upgrade).
+	// All fleet.yaml files in deployment have been updated to set
+	// `auth.octoServerURL` directly; if a deployment still carries
+	// `auth.serverJwksURL` after this version, auth initialization
+	// will fall back to the localhost default and the operator's
+	// next request to a real octo-server will fail loudly.
 	octoServerURL := vp.GetString("auth.octoServerURL")
 	if octoServerURL == "" {
-		jwksURL := vp.GetString("auth.serverJwksURL")
-		if jwksURL == "" {
-			octoServerURL = "http://localhost:8090"
-		} else {
-			octoServerURL = strings.TrimSuffix(jwksURL, "/.well-known/jwks.json")
-		}
+		octoServerURL = "http://localhost:8090"
 	}
 	auth.Initialize(auth.Config{OctoIMURL: octoServerURL})
 
