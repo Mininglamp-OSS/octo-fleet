@@ -12,6 +12,26 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+func TestModelsBaseURL(t *testing.T) {
+	cases := map[string]string{
+		"https://gw.example.com":          "https://gw.example.com",
+		"https://gw.example.com/":         "https://gw.example.com",
+		"https://gw.example.com/v1":       "https://gw.example.com",
+		"https://gw.example.com/v1/":      "https://gw.example.com",
+		"https://gw.example.com/V1":       "https://gw.example.com",
+		"https://gw.example.com///v1":     "https://gw.example.com",
+		"  https://gw.example.com/v1/  ":  "https://gw.example.com",
+		"https://gw.example.com/api":      "https://gw.example.com/api",
+		"https://gw.example.com/api/v1":   "https://gw.example.com/api",
+		"https://gw.example.com/v1/extra": "https://gw.example.com/v1/extra",
+	}
+	for in, want := range cases {
+		if got := modelsBaseURL(in); got != want {
+			t.Errorf("modelsBaseURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestParseModelIDs(t *testing.T) {
 	body := []byte(`{"data":[{"id":"ali/deepseek-r1","type":"model"},{"id":"vertexai/claude-opus-4-8"}]}`)
 	ids, err := parseModelIDs(body)

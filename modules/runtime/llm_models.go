@@ -44,6 +44,18 @@ func parseModelIDs(body []byte) ([]string, error) {
 	return ids, nil
 }
 
+// modelsBaseURL strips trailing slashes then a single trailing "/v1"
+// (case-insensitive) from a gateway URL, so the caller can append "/v1/models"
+// exactly once whether the gateway was given with or without the /v1 suffix.
+// Pure for unit testing.
+func modelsBaseURL(raw string) string {
+	base := strings.TrimRight(strings.TrimSpace(raw), "/")
+	if len(base) >= 3 && strings.EqualFold(base[len(base)-3:], "/v1") {
+		base = strings.TrimRight(base[:len(base)-3], "/")
+	}
+	return base
+}
+
 // isUnsafeIP rejects any address that must never be the target of a server-side
 // proxy request (SSRF). Normalizes v4-mapped (::ffff:a.b.c.d) and unwraps NAT64
 // (64:ff9b::/96) before testing, so an embedded private IPv4 cannot slip past.
@@ -148,13 +160,7 @@ func (rt *Runtime) fetchLLMModels(c *wkhttp.Context) {
 	if client == nil {
 		client = newSafeProxyClient(10 * time.Second)
 	}
-	// Strip any trailing slashes then a trailing "/v1" (case-insensitive) so we
-	// build "<gateway>/v1/models" exactly once whether the gateway was given with
-	// or without the /v1 suffix. validateProxyURL already proved it parses as https.
-	base := strings.TrimRight(strings.TrimSpace(req.GatewayURL), "/")
-	if len(base) >= 3 && strings.EqualFold(base[len(base)-3:], "/v1") {
-		base = strings.TrimRight(base[:len(base)-3], "/")
-	}
+	base := modelsBaseURL(req.GatewayURL)
 	httpReq, err := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, base+"/v1/models", nil)
 	if err != nil {
 		responseError(c, errcode.InternalError)
