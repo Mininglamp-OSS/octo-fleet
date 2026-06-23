@@ -166,25 +166,39 @@ func (rt *Runtime) register(c *wkhttp.Context) {
 		if err := json.Unmarshal([]byte(req.DeviceInfo), &di); err != nil {
 			rt.Warn("parse device_info failed", zap.String("daemon_id", req.DaemonID), zap.Error(err))
 		} else if di.DeviceID != "" {
-			// Clamp daemon-reported strings to their column widths
-			// (device_uuid varchar(100); os/arch/os_version varchar(50)) so an
-			// oversized value can't throw "Data too long" under strict mode.
-			id, e := rt.db.upsertDevice(
-				clampLen(di.DeviceID, 100), req.DeviceName,
-				clampLen(di.OS, 50), clampLen(di.Arch, 50), clampLen(di.OSVersion, 50),
-			)
-			if e != nil {
-				rt.Warn("upsert device failed, continuing without device link",
-					zap.String("device_uuid", di.DeviceID), zap.Error(e))
+			// device_uuid is an identity key — reject (skip the device link)
+			// rather than truncate an oversized value, since clamping could
+			// collapse two distinct uuids sharing a 100-char prefix into one
+			// row. os/arch/os_version are descriptive, so clamping them to
+			// their varchar(50) width (to avoid strict-mode "Data too long")
+			// is fine.
+			if len([]rune(di.DeviceID)) > 100 {
+				rt.Warn("device_id exceeds column width, skipping device link",
+					zap.String("daemon_id", req.DaemonID))
 			} else {
-				deviceID = id
-				for _, dc := range req.DeviceComponents {
-					if dc.Name == "" {
-						continue
-					}
-					if e := rt.db.upsertDeviceComponent(deviceID, dc.Type, dc.Name, dc.ComponentKey, dc.Version); e != nil {
-						rt.Warn("upsert device_component failed",
-							zap.Int64("device_id", deviceID), zap.String("name", dc.Name), zap.Error(e))
+				id, e := rt.db.upsertDevice(
+					di.DeviceID, req.DeviceName,
+					clampLen(di.OS, 50), clampLen(di.Arch, 50), clampLen(di.OSVersion, 50),
+				)
+				if e != nil {
+					rt.Warn("upsert device failed, continuing without device link",
+						zap.String("device_uuid", di.DeviceID), zap.Error(e))
+				} else {
+					deviceID = id
+					for _, dc := range req.DeviceComponents {
+						if dc.Name == "" {
+							continue
+						}
+						// Clamp component fields to their column widths
+						// (component_type 20, name 120, component_key 200,
+						// reported_version 50) so an oversized value can't drop
+						// the component via a "Data too long" error.
+						if e := rt.db.upsertDeviceComponent(deviceID,
+							clampLen(dc.Type, 20), clampLen(dc.Name, 120),
+							clampLen(dc.ComponentKey, 200), clampLen(dc.Version, 50)); e != nil {
+							rt.Warn("upsert device_component failed",
+								zap.Int64("device_id", deviceID), zap.String("name", dc.Name), zap.Error(e))
+						}
 					}
 				}
 			}
