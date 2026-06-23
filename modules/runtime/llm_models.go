@@ -137,7 +137,13 @@ func (rt *Runtime) fetchLLMModels(c *wkhttp.Context) {
 	if client == nil {
 		client = newSafeProxyClient(10 * time.Second)
 	}
-	base := strings.TrimSuffix(strings.TrimSuffix(strings.TrimSpace(req.GatewayURL), "/"), "/v1")
+	// Strip any trailing slashes then a trailing "/v1" (case-insensitive) so we
+	// build "<gateway>/v1/models" exactly once whether the gateway was given with
+	// or without the /v1 suffix. validateProxyURL already proved it parses as https.
+	base := strings.TrimRight(strings.TrimSpace(req.GatewayURL), "/")
+	if len(base) >= 3 && strings.EqualFold(base[len(base)-3:], "/v1") {
+		base = strings.TrimRight(base[:len(base)-3], "/")
+	}
 	httpReq, err := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, base+"/v1/models", nil)
 	if err != nil {
 		responseError(c, errcode.InternalError)
