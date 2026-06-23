@@ -93,6 +93,11 @@ func validateProxyURL(raw string) error {
 // IP, so a hostname that resolves safe-then-private (DNS rebinding) cannot slip
 // through between a pre-check and the real connection. Redirects are refused —
 // a 30x could otherwise bounce to an internal host.
+//
+// TLS is unaffected by the IP substitution: http.Transport derives the TLS
+// ServerName from the request's hostname (the addr it hands to DialContext),
+// not from the IP we connect to, so the certificate is still verified against
+// the original domain and InsecureSkipVerify stays off.
 func newSafeProxyClient(timeout time.Duration) *http.Client {
 	dialer := &net.Dialer{Timeout: timeout}
 	return &http.Client{
@@ -133,6 +138,12 @@ func (rt *Runtime) fetchLLMModels(c *wkhttp.Context) {
 		return
 	}
 
+	// scheme+host only, for diagnostics — never log path / query / api key.
+	gwHost := req.GatewayURL
+	if pu, perr := url.Parse(strings.TrimSpace(req.GatewayURL)); perr == nil {
+		gwHost = pu.Scheme + "://" + pu.Host
+	}
+
 	client := rt.proxyClient
 	if client == nil {
 		client = newSafeProxyClient(10 * time.Second)
@@ -154,20 +165,20 @@ func (rt *Runtime) fetchLLMModels(c *wkhttp.Context) {
 
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		rt.Error("fetchLLMModels: upstream request failed", zap.Error(err))
+		rt.Error("fetchLLMModels: upstream request failed", zap.String("gateway", gwHost), zap.Error(err))
 		responseErrorD(c, errcode.Validation, nil, "could not reach the gateway")
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != http.StatusOK {
-		rt.Error("fetchLLMModels: upstream non-200", zap.Int("status", resp.StatusCode))
+		rt.Error("fetchLLMModels: upstream non-200", zap.String("gateway", gwHost), zap.Int("status", resp.StatusCode))
 		responseErrorD(c, errcode.Validation, nil, fmt.Sprintf("gateway returned %d", resp.StatusCode))
 		return
 	}
 	ids, err := parseModelIDs(body)
 	if err != nil {
-		rt.Error("fetchLLMModels: parse models", zap.Error(err))
+		rt.Error("fetchLLMModels: parse models", zap.String("gateway", gwHost), zap.Error(err))
 		responseErrorD(c, errcode.Validation, nil, "unexpected models response from gateway")
 		return
 	}
