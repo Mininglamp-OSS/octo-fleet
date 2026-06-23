@@ -144,6 +144,35 @@ func (rt *Runtime) register(c *wkhttp.Context) {
 	ownerUID := c.MustGet("uid").(string)
 	spaceID := c.MustGet("space_id").(string)
 
+	// Resolve the device from device_info (carries device_id + os/arch/
+	// os_version). Old daemons that don't report a device_id skip this
+	// entirely — deviceID stays 0 (agent_runtime.device_id unlinked) and no
+	// device/device_component rows are written.
+	var deviceID int64
+	if req.DeviceInfo != "" {
+		var di deviceInfoJSON
+		if err := json.Unmarshal([]byte(req.DeviceInfo), &di); err != nil {
+			rt.Warn("parse device_info failed", zap.String("daemon_id", req.DaemonID), zap.Error(err))
+		} else if di.DeviceID != "" {
+			id, e := rt.db.upsertDevice(di.DeviceID, req.DeviceName, di.OS, di.Arch, di.OSVersion)
+			if e != nil {
+				rt.Error("upsert device failed", zap.String("device_uuid", di.DeviceID), zap.Error(e))
+				responseError(c, errcode.InternalError)
+				return
+			}
+			deviceID = id
+			for _, dc := range req.DeviceComponents {
+				if dc.Name == "" {
+					continue
+				}
+				if e := rt.db.upsertDeviceComponent(deviceID, dc.Type, dc.Name, dc.ComponentKey, dc.Version); e != nil {
+					rt.Warn("upsert device_component failed",
+						zap.Int64("device_id", deviceID), zap.String("name", dc.Name), zap.Error(e))
+				}
+			}
+		}
+	}
+
 	var registered []registeredRuntimeResp
 
 	for _, r := range req.Runtimes {
@@ -176,6 +205,7 @@ func (rt *Runtime) register(c *wkhttp.Context) {
 		m := &agentRuntimeModel{
 			SpaceID:             spaceID,
 			DaemonID:            req.DaemonID,
+			DeviceID:            deviceID,
 			Name:                r.Name,
 			Provider:            r.Type,
 			RuntimeMode:         "local",
