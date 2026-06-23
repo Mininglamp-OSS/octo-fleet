@@ -355,7 +355,7 @@ func (rt *Runtime) createPluginUpgradeTask(c *wkhttp.Context, loginUID string, r
 
 	var ccSecret *ccOctoSecret
 	if component == componentCcOcto && isInstall {
-		ccSecret = &ccOctoSecret{GatewayURL: req.GatewayURL, APIKey: req.APIKey}
+		ccSecret = &ccOctoSecret{GatewayURL: req.GatewayURL, APIKey: req.APIKey, Model: req.Model}
 	}
 	rt.insertUpgradeTask(c, insertTaskArgs{
 		SpaceID:     req.SpaceID,
@@ -457,19 +457,25 @@ func (rt *Runtime) insertUpgradeTask(c *wkhttp.Context, args insertTaskArgs) {
 		responseError(c, errcode.InternalError)
 		return
 	}
-	// F-1 (lml2468 review): tx.Commit() err 必须接 — 之前 swallow 会返
-	// 200 OK 但 taskID 不存在, SSE dispatch 推 event daemon 追不到行,
-	// 静默腐败. 接 err → 500 让 daemon 不收到 event, web 看到 5xx 重试.
+	// cc-octo install secret 必须在 commit + dispatch 之前入 store —— dispatchUpgrade
+	// 会唤醒 daemon 立刻来 fetch,晚于此即 404 竞态;放在 commit 之前,即使 commit
+	// 失败也只在内存留一份 TTL 自清的 orphan secret,不会出现"任务已落库但 secret
+	// 永久缺失、daemon 只能 Conflict 等 sweeper 超时回收"的窗口。secret 不持久化,只内存中转。
+	if args.CcSecret != nil {
+		rt.ccSecrets.put(taskID, *args.CcSecret)
+	}
+
+	// tx.Commit() 的 err 必须接 —— swallow 会返 200 OK 但 taskID 落不了库,
+	// SSE dispatch 推的 event daemon 追不到行,静默腐败。接 err → 500,daemon
+	// 收不到 event、web 看到 5xx 自行重试。
 	if err := tx.Commit(); err != nil {
+		if args.CcSecret != nil {
+			// 任务没落库,清掉刚入的 orphan secret(TTL 也会兜底)。
+			rt.ccSecrets.evict(taskID)
+		}
 		rt.Error("commit upgrade task", zap.Error(err), zap.String("task_id", taskID))
 		responseError(c, errcode.InternalError)
 		return
-	}
-
-	// cc-octo install secret 必须在 dispatch 之前入 store —— dispatchUpgrade 会
-	// 唤醒 daemon 立刻来 fetch,晚于此即 404 竞态。secret 不持久化,只内存中转。
-	if args.CcSecret != nil {
-		rt.ccSecrets.put(taskID, *args.CcSecret)
 	}
 
 	// 决策三 SSE 反向派发 (Phase A 双跑): component/plugin upgrade 已知
@@ -731,7 +737,7 @@ func (d *runtimeDB) completeUpgradeIfMatched(daemonID, spaceID, ownerUID, compon
 func (d *runtimeDB) completeUpgradeIfMatchedWithRuntime(daemonID, spaceID, ownerUID, component, actualVersion string, runtimeID int64) []string {
 	var candidates []upgradeTask
 	var completedIDs []string
-	// F-3 (lml2468 review): 加 'pending' 对称 R3, 跟 completeUpgradeIfMatched 同理由.
+	// 'pending' 也纳入候选集,与 completeUpgradeIfMatched 的状态集合保持对称。
 	_, err := d.session.SelectBySql(
 		`SELECT id, space_id, daemon_id, owner_uid, component, from_version, to_version, download_url, checksum, COALESCE(metadata,'') as metadata, status
 		 FROM runtime_upgrade_task

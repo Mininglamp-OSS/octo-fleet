@@ -16,6 +16,7 @@ import (
 type ccOctoConfigResponse struct {
 	GatewayURL string `json:"gateway_url"`
 	APIKey     string `json:"api_key"`
+	Model      string `json:"model,omitempty"`
 }
 
 // GET /v1/upgrades/{task_id}/cc-octo-config?runtime_id=N
@@ -113,5 +114,5 @@ func (rt *Runtime) fetchCcOctoConfig(c *wkhttp.Context) {
 		responseError(c, errcode.NotFound)
 		return
 	}
-	ResponseData(c, ccOctoConfigResponse{GatewayURL: secret.GatewayURL, APIKey: secret.APIKey})
+	ResponseData(c, ccOctoConfigResponse{GatewayURL: secret.GatewayURL, APIKey: secret.APIKey, Model: secret.Model})
 }

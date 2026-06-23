@@ -62,6 +62,16 @@ func TestCreatePluginUpgradeTask_CcOctoInstallNeedsSecret(t *testing.T) {
 			break
 		}
 	}
+
+	// put 发生在 tx.Commit() 之前,所以 commit 失败会留下 orphan secret;
+	// 必须在 commit 失败分支 evict 掉(TTL 兜底之外的即时清理)。锁住这条。
+	commitIdx := strings.Index(body, "tx.Commit()")
+	if putIdx < 0 || commitIdx < 0 || putIdx > commitIdx {
+		t.Error("ccSecrets.put must run before tx.Commit so the daemon's immediate fetch can't miss the secret")
+	}
+	if !regexp.MustCompile(`if err := tx\.Commit\(\); err != nil \{[\s\S]*?ccSecrets\.evict\(`).MatchString(body) {
+		t.Error("commit-failure branch must evict the orphan cc-octo secret")
+	}
 }
 
 // install 复用 upgrade 的版本比对:空 fromVersion 必须被判为"比 latest 旧"才能放行

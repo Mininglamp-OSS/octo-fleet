@@ -15,6 +15,7 @@ const ccOctoSecretTTL = 10 * time.Minute
 type ccOctoSecret struct {
 	GatewayURL string
 	APIKey     string
+	Model      string
 }
 
 type ccOctoSecretEntry struct {

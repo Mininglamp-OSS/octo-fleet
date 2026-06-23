@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"encoding/json"
+	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
@@ -27,6 +28,9 @@ type Runtime struct {
 	sseHub    *sseHub
 	providers *providerRegistry
 	ccSecrets *ccOctoSecretStore
+	// proxyClient is the http client for the server-side /v1/models proxy. nil in
+	// production → newSafeProxyClient (dial-time SSRF gate); injected in tests.
+	proxyClient *http.Client
 }
 
 func New(ctx *config.Context) *Runtime {
@@ -78,6 +82,7 @@ func (rt *Runtime) Route(r *wkhttp.WKHttp) {
 	web := r.Group("/v1", auth.Middleware("web"))
 	{
 		web.GET("/runtimes", rt.list)
+		web.POST("/runtimes/llm-models", rt.fetchLLMModels)           // proxy gateway /v1/models for the install model picker
 		web.DELETE("/runtimes/:runtime_id", rt.deleteRuntime)
 		web.POST("/upgrades", rt.upgradeInit)
 		web.GET("/upgrades/:task_id", rt.upgradeGet)
