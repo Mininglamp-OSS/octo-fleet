@@ -26,7 +26,8 @@ func (d *runtimeDB) upsert(m *agentRuntimeModel) (int64, error) {
 		INSERT INTO agent_runtime (space_id, daemon_id, device_id, name, provider, runtime_mode, status, version, device_name, device_info, metadata, owner_uid, heartbeat_interval_ms, last_seen_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
 		ON DUPLICATE KEY UPDATE
-			device_id=VALUES(device_id), name=VALUES(name), status=VALUES(status), version=VALUES(version),
+			device_id=IF(VALUES(device_id)>0, VALUES(device_id), device_id),
+			name=VALUES(name), status=VALUES(status), version=VALUES(version),
 			device_name=VALUES(device_name), device_info=VALUES(device_info),
 			metadata=VALUES(metadata),
 			heartbeat_interval_ms=IF(VALUES(heartbeat_interval_ms)>0, VALUES(heartbeat_interval_ms), heartbeat_interval_ms),

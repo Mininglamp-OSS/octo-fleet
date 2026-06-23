@@ -96,6 +96,16 @@ func (rt *Runtime) Route(r *wkhttp.WKHttp) {
 	}
 }
 
+// clampLen truncates s to at most n runes so a daemon-reported value can't
+// exceed its column width and trip MySQL strict mode's "Data too long".
+func clampLen(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n])
+}
+
 // register godoc
 // @Summary      Register daemon runtimes
 // @Description  Register (upsert) this daemon's detected runtimes. Idempotent; disabled/unknown providers are dropped server-side.
@@ -147,27 +157,35 @@ func (rt *Runtime) register(c *wkhttp.Context) {
 	// Resolve the device from device_info (carries device_id + os/arch/
 	// os_version). Old daemons that don't report a device_id skip this
 	// entirely — deviceID stays 0 (agent_runtime.device_id unlinked) and no
-	// device/device_component rows are written.
+	// device/device_component rows are written. Device telemetry is additive,
+	// so its failures must NOT brick the primary runtime registration: a
+	// parse error or a failed upsert only logs and continues with deviceID=0.
 	var deviceID int64
 	if req.DeviceInfo != "" {
 		var di deviceInfoJSON
 		if err := json.Unmarshal([]byte(req.DeviceInfo), &di); err != nil {
 			rt.Warn("parse device_info failed", zap.String("daemon_id", req.DaemonID), zap.Error(err))
 		} else if di.DeviceID != "" {
-			id, e := rt.db.upsertDevice(di.DeviceID, req.DeviceName, di.OS, di.Arch, di.OSVersion)
+			// Clamp daemon-reported strings to their column widths
+			// (device_uuid varchar(100); os/arch/os_version varchar(50)) so an
+			// oversized value can't throw "Data too long" under strict mode.
+			id, e := rt.db.upsertDevice(
+				clampLen(di.DeviceID, 100), req.DeviceName,
+				clampLen(di.OS, 50), clampLen(di.Arch, 50), clampLen(di.OSVersion, 50),
+			)
 			if e != nil {
-				rt.Error("upsert device failed", zap.String("device_uuid", di.DeviceID), zap.Error(e))
-				responseError(c, errcode.InternalError)
-				return
-			}
-			deviceID = id
-			for _, dc := range req.DeviceComponents {
-				if dc.Name == "" {
-					continue
-				}
-				if e := rt.db.upsertDeviceComponent(deviceID, dc.Type, dc.Name, dc.ComponentKey, dc.Version); e != nil {
-					rt.Warn("upsert device_component failed",
-						zap.Int64("device_id", deviceID), zap.String("name", dc.Name), zap.Error(e))
+				rt.Warn("upsert device failed, continuing without device link",
+					zap.String("device_uuid", di.DeviceID), zap.Error(e))
+			} else {
+				deviceID = id
+				for _, dc := range req.DeviceComponents {
+					if dc.Name == "" {
+						continue
+					}
+					if e := rt.db.upsertDeviceComponent(deviceID, dc.Type, dc.Name, dc.ComponentKey, dc.Version); e != nil {
+						rt.Warn("upsert device_component failed",
+							zap.Int64("device_id", deviceID), zap.String("name", dc.Name), zap.Error(e))
+					}
 				}
 			}
 		}
