@@ -101,6 +101,16 @@ func (rt *Runtime) Route(r *wkhttp.WKHttp) {
 	}
 }
 
+// clampLen truncates s to at most n runes so a daemon-reported value can't
+// exceed its column width and trip MySQL strict mode's "Data too long".
+func clampLen(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n])
+}
+
 // register godoc
 // @Summary      Register daemon runtimes
 // @Description  Register (upsert) this daemon's detected runtimes. Idempotent; disabled/unknown providers are dropped server-side.
@@ -149,6 +159,57 @@ func (rt *Runtime) register(c *wkhttp.Context) {
 	ownerUID := c.MustGet("uid").(string)
 	spaceID := c.MustGet("space_id").(string)
 
+	// Resolve the device from device_info (carries device_id + os/arch/
+	// os_version). Old daemons that don't report a device_id skip this
+	// entirely — deviceID stays 0 (agent_runtime.device_id unlinked) and no
+	// device/device_component rows are written. Device telemetry is additive,
+	// so its failures must NOT brick the primary runtime registration: a
+	// parse error or a failed upsert only logs and continues with deviceID=0.
+	var deviceID int64
+	if req.DeviceInfo != "" {
+		var di deviceInfoJSON
+		if err := json.Unmarshal([]byte(req.DeviceInfo), &di); err != nil {
+			rt.Warn("parse device_info failed", zap.String("daemon_id", req.DaemonID), zap.Error(err))
+		} else if di.DeviceID != "" {
+			// device_uuid is an identity key — reject (skip the device link)
+			// rather than truncate an oversized value, since clamping could
+			// collapse two distinct uuids sharing a 100-char prefix into one
+			// row. os/arch/os_version are descriptive, so clamping them to
+			// their varchar(50) width (to avoid strict-mode "Data too long")
+			// is fine.
+			if len([]rune(di.DeviceID)) > 100 {
+				rt.Warn("device_id exceeds column width, skipping device link",
+					zap.String("daemon_id", req.DaemonID))
+			} else {
+				id, e := rt.db.upsertDevice(
+					di.DeviceID, req.DeviceName,
+					clampLen(di.OS, 50), clampLen(di.Arch, 50), clampLen(di.OSVersion, 50),
+				)
+				if e != nil {
+					rt.Warn("upsert device failed, continuing without device link",
+						zap.String("device_uuid", di.DeviceID), zap.Error(e))
+				} else {
+					deviceID = id
+					for _, dc := range req.DeviceComponents {
+						if dc.Name == "" {
+							continue
+						}
+						// Clamp component fields to their column widths
+						// (component_type 20, name 120, component_key 200,
+						// reported_version 50) so an oversized value can't drop
+						// the component via a "Data too long" error.
+						if e := rt.db.upsertDeviceComponent(deviceID,
+							clampLen(dc.Type, 20), clampLen(dc.Name, 120),
+							clampLen(dc.ComponentKey, 200), clampLen(dc.Version, 50)); e != nil {
+							rt.Warn("upsert device_component failed",
+								zap.Int64("device_id", deviceID), zap.String("name", dc.Name), zap.Error(e))
+						}
+					}
+				}
+			}
+		}
+	}
+
 	var registered []registeredRuntimeResp
 
 	for _, r := range req.Runtimes {
@@ -181,6 +242,7 @@ func (rt *Runtime) register(c *wkhttp.Context) {
 		m := &agentRuntimeModel{
 			SpaceID:             spaceID,
 			DaemonID:            req.DaemonID,
+			DeviceID:            deviceID,
 			Name:                r.Name,
 			Provider:            r.Type,
 			RuntimeMode:         "local",

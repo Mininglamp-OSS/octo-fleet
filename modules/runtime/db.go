@@ -23,15 +23,16 @@ func newRuntimeDB(ctx *config.Context) *runtimeDB {
 
 func (d *runtimeDB) upsert(m *agentRuntimeModel) (int64, error) {
 	result, err := d.session.InsertBySql(`
-		INSERT INTO agent_runtime (space_id, daemon_id, name, provider, runtime_mode, status, version, device_name, device_info, metadata, owner_uid, heartbeat_interval_ms, last_seen_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+		INSERT INTO agent_runtime (space_id, daemon_id, device_id, name, provider, runtime_mode, status, version, device_name, device_info, metadata, owner_uid, heartbeat_interval_ms, last_seen_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
 		ON DUPLICATE KEY UPDATE
+			device_id=IF(VALUES(device_id)>0, VALUES(device_id), device_id),
 			name=VALUES(name), status=VALUES(status), version=VALUES(version),
 			device_name=VALUES(device_name), device_info=VALUES(device_info),
 			metadata=VALUES(metadata),
 			heartbeat_interval_ms=IF(VALUES(heartbeat_interval_ms)>0, VALUES(heartbeat_interval_ms), heartbeat_interval_ms),
 			last_seen_at=NOW()`,
-		m.SpaceID, m.DaemonID, m.Name, m.Provider, m.RuntimeMode,
+		m.SpaceID, m.DaemonID, m.DeviceID, m.Name, m.Provider, m.RuntimeMode,
 		m.Status, m.Version, m.DeviceName, m.DeviceInfo, m.Metadata, m.OwnerUID, m.HeartbeatIntervalMs,
 	).Exec()
 	if err != nil {
@@ -52,6 +53,50 @@ func (d *runtimeDB) upsert(m *agentRuntimeModel) (int64, error) {
 		}
 	}
 	return id, nil
+}
+
+// upsertDevice inserts or refreshes the device row keyed by device_uuid
+// (the daemon-reported device identity, parsed from device_info) and returns
+// device.id, which callers store as agent_runtime.device_id /
+// device_component.device_id. Mirrors upsert's LastInsertId==0 fallback for
+// pure-UPDATE hits.
+func (d *runtimeDB) upsertDevice(deviceUUID, hostname, os, arch, osVersion string) (int64, error) {
+	result, err := d.session.InsertBySql(
+		`INSERT INTO device (device_uuid, hostname, os, arch, os_version, status, last_seen_at)
+		 VALUES (?, ?, ?, ?, ?, 'online', NOW())
+		 ON DUPLICATE KEY UPDATE hostname=VALUES(hostname), os=VALUES(os), arch=VALUES(arch),
+		   os_version=VALUES(os_version), status='online', last_seen_at=NOW()`,
+		deviceUUID, hostname, os, arch, osVersion,
+	).Exec()
+	if err != nil {
+		return 0, err
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	if id == 0 {
+		_, err = d.session.SelectBySql("SELECT id FROM device WHERE device_uuid=?", deviceUUID).Load(&id)
+		if err != nil {
+			return 0, err
+		}
+	}
+	return id, nil
+}
+
+// upsertDeviceComponent records the reported state of one (device × component)
+// keyed by (device_id, component_type, name). It writes ONLY the reported_*
+// columns — desired_* and state are owned by the control plane and must never
+// be touched here (env-component §2.2 invariant).
+func (d *runtimeDB) upsertDeviceComponent(deviceID int64, ctype, name, componentKey, reportedVersion string) error {
+	_, err := d.session.InsertBySql(
+		`INSERT INTO device_component (device_id, component_type, name, component_key, reported_version, reported_at)
+		 VALUES (?, ?, ?, ?, ?, NOW())
+		 ON DUPLICATE KEY UPDATE component_key=VALUES(component_key),
+		   reported_version=VALUES(reported_version), reported_at=NOW()`,
+		deviceID, ctype, name, componentKey, reportedVersion,
+	).Exec()
+	return err
 }
 
 // queryByUniqueKey looks up the agent_runtime row by the 4-tuple unique

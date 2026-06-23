@@ -7,6 +7,7 @@ import (
 type agentRuntimeModel struct {
 	SpaceID             string
 	DaemonID            string
+	DeviceID            int64 // FK device.id; 0 = not linked
 	Name                string
 	Provider            string
 	RuntimeMode         string
@@ -22,12 +23,29 @@ type agentRuntimeModel struct {
 }
 
 type registerReq struct {
-	DaemonID            string       `json:"daemon_id"`
-	DeviceName          string       `json:"device_name"`
-	DeviceInfo          string       `json:"device_info"`
-	CLIVersion          string       `json:"cli_version"`
-	HeartbeatIntervalMs int64        `json:"heartbeat_interval_ms,omitempty"` // daemon-reported, 0 = unset
-	Runtimes            []runtimeReq `json:"runtimes"`
+	DaemonID            string               `json:"daemon_id"`
+	DeviceName          string               `json:"device_name"`
+	DeviceInfo          string               `json:"device_info"` // JSON string; carries device_id + os/arch/os_version
+	CLIVersion          string               `json:"cli_version"`
+	HeartbeatIntervalMs int64                `json:"heartbeat_interval_ms,omitempty"` // daemon-reported, 0 = unset
+	Runtimes            []runtimeReq         `json:"runtimes"`
+	DeviceComponents    []deviceComponentReq `json:"device_components"` // machine-level component inventory (npm -g etc.)
+}
+
+// deviceInfoJSON is the parsed shape of registerReq.DeviceInfo. device_id here
+// is the daemon-reported device identity → device.device_uuid.
+type deviceInfoJSON struct {
+	DeviceID  string `json:"device_id"`
+	OS        string `json:"os"`
+	Arch      string `json:"arch"`
+	OSVersion string `json:"os_version"`
+}
+
+type deviceComponentReq struct {
+	Type         string `json:"type"`          // package-manager / runtime type, e.g. "nodejs"
+	Name         string `json:"name"`          // logical name, e.g. "octo-daemon"
+	ComponentKey string `json:"component_key"` // install id, e.g. "@mininglamp-oss/octo-daemon"
+	Version      string `json:"version"`
 }
 
 type runtimeReq struct {
