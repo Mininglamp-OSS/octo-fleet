@@ -241,26 +241,6 @@ func (d *runtimeDB) claimPendingBotProvision(daemonID, spaceID, ownerUID, runtim
 	return &m, nil
 }
 
-// resolveBotByUID looks up a bot by its bot_uid (called by bot_task
-// dispatch to find workspace_id + daemon_id + runtime_kind for a matter
-// assignee). Replaces the old managed_runtime_agent reverse lookup.
-func (d *runtimeDB) resolveBotByUID(spaceID, botUID string) (*botModel, error) {
-	var m botModel
-	count, err := d.session.SelectBySql(
-		"SELECT "+botSelectColumns+` FROM bot
-		 WHERE space_id=? AND bot_uid=? AND status!=?
-		 ORDER BY id DESC LIMIT 1`,
-		spaceID, botUID, botStatusArchived,
-	).Load(&m)
-	if err != nil {
-		return nil, err
-	}
-	if count == 0 {
-		return nil, nil
-	}
-	return &m, nil
-}
-
 // ---------- helpers ----------
 
 var workspaceSanitizer = regexp.MustCompile(`[^a-z0-9_-]+`)
@@ -363,7 +343,6 @@ func (rt *Runtime) createBot(c *wkhttp.Context) {
 	// then POST /v1/bots/{bot_id}/mint here to set the credentials
 	// and trigger bot.provision. This row stays in `draft` status until
 	// that patch arrives.
-	_ = generateBotToken // helper retained for legacy callers
 	row.CreatedAt = db.Time(time.Now())
 	row.UpdatedAt = row.CreatedAt
 	ResponseCreated(c, toBotResp(row))
@@ -746,12 +725,4 @@ func randomToken() string {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
-}
-
-// generateBotToken mirrors the bf_xxx scheme the IM /newbot flow uses,
-// so downstream Octo /v1/bot/* endpoints don't need a special-case parser.
-func generateBotToken() string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	return "bf_" + hex.EncodeToString(b)
 }

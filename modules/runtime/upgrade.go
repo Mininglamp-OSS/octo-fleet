@@ -65,7 +65,6 @@ func (rt *Runtime) upgradeInit(c *wkhttp.Context) {
 		responseError(c, errcode.Forbidden)
 		return
 	}
-	_ = loginUID
 
 	// 2. 查 daemon
 	var daemon agentRuntimeModel
