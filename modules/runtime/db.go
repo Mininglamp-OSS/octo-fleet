@@ -2,7 +2,6 @@ package runtime
 
 import (
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/Mininglamp-OSS/octo-lib/config"
@@ -210,13 +209,6 @@ func (d *runtimeDB) deleteByID(id int64) error {
 	return err
 }
 
-func (d *runtimeDB) deleteBySpaceAndDaemon(spaceID, daemonID string) error {
-	_, err := d.session.DeleteFrom("agent_runtime").
-		Where("space_id=? AND daemon_id=?", spaceID, daemonID).
-		Exec()
-	return err
-}
-
 func (d *runtimeDB) queryLatestVersions() (map[string]string, error) {
 	var rows []struct {
 		Component     string `db:"component"`
@@ -272,42 +264,6 @@ func (d *runtimeDB) queryBotInfoByUIDs(spaceID string, uids []string) (map[strin
 	// call when needed. Return empty map so callers fall back to
 	// raw UIDs.
 	return map[string]botInfo{}, nil
-}
-
-// queryBotInfoByUIDsLegacy is kept here as reference for the original
-// implementation; not invoked from fleet.
-func (d *runtimeDB) queryBotInfoByUIDsLegacy(spaceID string, uids []string) (map[string]botInfo, error) {
-	if len(uids) == 0 || spaceID == "" {
-		return map[string]botInfo{}, nil
-	}
-	// dbr 的 IN 参数需要 []interface{}
-	args := make([]interface{}, 0, len(uids)+1)
-	args = append(args, spaceID)
-	placeholders := make([]string, len(uids))
-	for i, uid := range uids {
-		placeholders[i] = "?"
-		args = append(args, uid)
-	}
-	sql := fmt.Sprintf(
-		"SELECT u.uid, u.name FROM `user` u "+
-			"INNER JOIN robot r ON r.robot_id = u.uid AND r.status = 1 "+
-			"INNER JOIN space_member sm ON sm.uid = u.uid AND sm.space_id = ? AND sm.status = 1 "+
-			"WHERE u.robot = 1 AND u.uid IN (%s)",
-		strings.Join(placeholders, ","),
-	)
-	var rows []struct {
-		UID  string `db:"uid"`
-		Name string `db:"name"`
-	}
-	_, err := d.session.SelectBySql(sql, args...).Load(&rows)
-	if err != nil {
-		return nil, err
-	}
-	result := make(map[string]botInfo, len(rows))
-	for _, r := range rows {
-		result[r.UID] = botInfo{UID: r.UID, Name: r.Name}
-	}
-	return result, nil
 }
 
 // listActiveBotsForDaemon returns bot_uid + workspace_id for every active
