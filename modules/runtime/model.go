@@ -220,7 +220,7 @@ type versionHint struct {
 	PluginInstallVersion string `json:"plugin_install_version,omitempty"` // set only when the provider's adapter plugin is NOT installed but a latest version is published; lets the UI gate one-click install
 }
 
-// daemonVersionHint flags an available daemon (CLI) update (per daemon_id).
+// daemonVersionHint flags an available daemon (octo-daemon) update (per device.id).
 type daemonVersionHint struct {
 	HasUpdate     bool   `json:"has_update,omitempty"`
 	LatestVersion string `json:"latest_version,omitempty"`
@@ -242,6 +242,7 @@ type deviceComponentView struct {
 type deviceView struct {
 	DeviceID   int64                 `json:"device_id"`   // device.id (PK)
 	DeviceUUID string                `json:"device_uuid"` // daemon-reported persistent identity
+	DaemonID   string                `json:"daemon_id"`   // the daemon channel for this device in the requested space (latest-seen runtime's daemon_id)
 	Name       string                `json:"name"`        // hostname
 	OS         string                `json:"os"`
 	Arch       string                `json:"arch"`
@@ -254,11 +255,11 @@ type deviceView struct {
 // runtimesView is the GET /runtimes aggregate (list + per-id/per-daemon
 // update hints + in-progress upgrades). Single-object envelope, not paginated.
 type runtimesView struct {
-	Runtimes           []runtimeResp                `json:"runtimes"`
-	VersionHints       map[int64]versionHint        `json:"version_hints"`
-	DaemonVersionHints map[string]daemonVersionHint `json:"daemon_version_hints"`
-	ActiveUpgrades     []activeUpgradeItem          `json:"active_upgrades"`
-	Devices            map[int64]deviceView         `json:"devices"` // keyed by device.id (PK)
+	Runtimes           []runtimeResp               `json:"runtimes"`
+	VersionHints       map[int64]versionHint       `json:"version_hints"`
+	DaemonVersionHints map[int64]daemonVersionHint `json:"daemon_version_hints"` // keyed by device.id (1:1 with Devices)
+	ActiveUpgrades     []activeUpgradeItem         `json:"active_upgrades"`
+	Devices            map[int64]deviceView        `json:"devices"` // keyed by device.id (PK)
 }
 
 // upgradeInitResp is the POST /upgrades response.

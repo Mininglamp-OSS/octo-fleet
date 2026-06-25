@@ -648,32 +648,6 @@ func (rt *Runtime) list(c *wkhttp.Context) {
 		}
 	}
 
-	// Build daemon version hints per daemon_id
-	daemonVersionHints := make(map[string]daemonVersionHint)
-	if latestVersions != nil {
-		if daemonLatest, ok := latestVersions["octo-daemon"]; ok && daemonLatest != "" {
-			seen := make(map[string]bool)
-			for _, r := range list {
-				if seen[r.DaemonID] {
-					continue
-				}
-				seen[r.DaemonID] = true
-				var meta map[string]interface{}
-				if r.Metadata != "" {
-					json.Unmarshal([]byte(r.Metadata), &meta)
-				}
-				cliVer, _ := meta["cli_version"].(string)
-				if cliVer != "" && isVersionOlder(cliVer, daemonLatest) {
-					daemonVersionHints[r.DaemonID] = daemonVersionHint{
-						HasUpdate:     true,
-						LatestVersion: daemonLatest,
-						Current:       cliVer,
-					}
-				}
-			}
-		}
-	}
-
 	// 查询每个 (daemon_id, component) 最新的进行中升级任务
 	// 改成数组响应，供前端按 runtime_id / daemon_id + component 恢复按钮态。
 	// failed/timeout 是终态，不占 active slot —— 用户应当能立刻重新点 Upgrade
@@ -719,16 +693,21 @@ func (rt *Runtime) list(c *wkhttp.Context) {
 	// device + its reported component versions (keyed by device.id) so the
 	// page can show device name / id / os version + per-component versions.
 	// last_seen_at on the device is the max across its runtimes, not the
-	// device table's own column.
+	// device table's own column. daemon_id is the channel to use for upgrades
+	// on this device in the requested space; within a space device↔daemon is
+	// effectively 1:1, and we tie-break on the latest-seen runtime.
 	deviceIDSet := make(map[int64]struct{})
 	deviceLastSeen := make(map[int64]time.Time)
+	deviceDaemon := make(map[int64]string)
 	for _, m := range models {
 		if m.DeviceID <= 0 {
 			continue
 		}
 		deviceIDSet[m.DeviceID] = struct{}{}
-		if t := time.Time(m.LastSeenAt); t.After(deviceLastSeen[m.DeviceID]) {
+		t := time.Time(m.LastSeenAt)
+		if prev, seen := deviceLastSeen[m.DeviceID]; !seen || t.After(prev) {
 			deviceLastSeen[m.DeviceID] = t
+			deviceDaemon[m.DeviceID] = m.DaemonID
 		}
 	}
 	deviceIDs := make([]int64, 0, len(deviceIDSet))
@@ -742,7 +721,34 @@ func (rt *Runtime) list(c *wkhttp.Context) {
 	}
 	for id, dv := range devices {
 		dv.LastSeenAt = formatTime(deviceLastSeen[id])
+		dv.DaemonID = deviceDaemon[id]
 		devices[id] = dv
+	}
+
+	// Build daemon version hints per device.id (1:1 with the devices map).
+	// octo-daemon is a machine-level npm component, so "current" is the
+	// version npm reports (device_component.reported_version, surfaced in the
+	// device's components), NOT the running binary's ldflags version — the
+	// upgrade is `npm install -g`, so the npm-installed version is what decides
+	// whether an update is available. latest stays runtime_latest_version.
+	daemonVersionHints := make(map[int64]daemonVersionHint)
+	if daemonLatest := latestVersions["octo-daemon"]; daemonLatest != "" {
+		for id, dv := range devices {
+			current := ""
+			for _, comp := range dv.Components {
+				if comp.Name == "octo-daemon" {
+					current = comp.Version
+					break
+				}
+			}
+			if current != "" && isVersionOlder(current, daemonLatest) {
+				daemonVersionHints[id] = daemonVersionHint{
+					HasUpdate:     true,
+					LatestVersion: daemonLatest,
+					Current:       current,
+				}
+			}
+		}
 	}
 
 	ResponseData(c, runtimesView{
