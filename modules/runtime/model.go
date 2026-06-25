@@ -25,11 +25,10 @@ type agentRuntimeModel struct {
 type registerReq struct {
 	DaemonID            string               `json:"daemon_id"`
 	DeviceName          string               `json:"device_name"`
-	DeviceInfo          string               `json:"device_info"` // JSON string; carries device_id + os/arch/os_version
-	CLIVersion          string               `json:"cli_version"`
+	DeviceInfo          string               `json:"device_info"`                     // JSON string; carries device_id + os/arch/os_version
 	HeartbeatIntervalMs int64                `json:"heartbeat_interval_ms,omitempty"` // daemon-reported, 0 = unset
 	Runtimes            []runtimeReq         `json:"runtimes"`
-	DeviceComponents    []deviceComponentReq `json:"device_components"` // machine-level component inventory (npm -g etc.)
+	DeviceComponents    []deviceComponentReq `json:"device_components"` // machine-level component inventory (npm -g etc.); octo-daemon version sourced from here
 }
 
 // deviceInfoJSON is the parsed shape of registerReq.DeviceInfo. device_id here

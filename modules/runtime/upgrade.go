@@ -190,12 +190,15 @@ func (rt *Runtime) createDaemonUpgradeTask(c *wkhttp.Context, loginUID string, r
 		return
 	}
 
-	// 当前版本
-	var metaJSON struct {
-		CLIVersion string `json:"cli_version"`
+	// 当前版本:与 GET /runtimes 的 daemon_version_hints 同源 —— 取该 device
+	// 上报的 octo-daemon device_component.reported_version(npm 实装版本),
+	// 不再用 metadata.cli_version(运行中二进制 ldflags 版本)。两处同源,
+	// 避免「提示有更新但受理 409」以及 stale cli_version 无条件重升。
+	fromVersion, err := rt.db.queryDaemonReportedVersion(daemon.DeviceID)
+	if err != nil {
+		responseError(c, errcode.InternalError)
+		return
 	}
-	json.Unmarshal([]byte(daemon.Metadata), &metaJSON)
-	fromVersion := metaJSON.CLIVersion
 
 	if fromVersion != "" && fromVersion == versionRow.LatestVersion {
 		responseError(c, errcode.Conflict)

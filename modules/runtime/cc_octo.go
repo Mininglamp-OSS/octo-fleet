@@ -83,3 +83,27 @@ func computePluginHint(provider, metadataJSON string, latest map[string]string) 
 	}
 	return false, ""
 }
+
+// computeDaemonHint derives the octo-daemon update hint for a device from its
+// machine-level components. "current" is the npm-installed octo-daemon
+// reported_version — the single authoritative source shared with the upgrade
+// gate (createDaemonUpgradeTask via queryDaemonReportedVersion), so the hint and
+// the gate never disagree. Returns ok=false when there's nothing to advertise:
+// no latest published, no octo-daemon component reported, or already at/above
+// latest.
+func computeDaemonHint(components []deviceComponentView, latest string) (daemonVersionHint, bool) {
+	if latest == "" {
+		return daemonVersionHint{}, false
+	}
+	current := ""
+	for _, comp := range components {
+		if comp.Name == componentDaemon {
+			current = comp.Version
+			break
+		}
+	}
+	if current == "" || !isVersionOlder(current, latest) {
+		return daemonVersionHint{}, false
+	}
+	return daemonVersionHint{HasUpdate: true, LatestVersion: latest, Current: current}, true
+}

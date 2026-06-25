@@ -272,6 +272,24 @@ func (d *runtimeDB) queryDevicesWithComponents(deviceIDs []int64) (map[int64]dev
 	return result, nil
 }
 
+// queryDaemonReportedVersion returns the npm-installed octo-daemon version for
+// a device, read from device_component.reported_version (name="octo-daemon").
+// This is the single authoritative source for the daemon's current version —
+// the same one GET /runtimes hints off — so the upgrade gate agrees with the
+// hint. Returns "" when the device has no octo-daemon component row (e.g. a
+// pre-device daemon, deviceID==0), which the caller treats as unknown.
+func (d *runtimeDB) queryDaemonReportedVersion(deviceID int64) (string, error) {
+	if deviceID <= 0 {
+		return "", nil
+	}
+	var version string
+	_, err := d.session.SelectBySql(
+		"SELECT reported_version FROM device_component WHERE device_id=? AND name=?",
+		deviceID, componentDaemon,
+	).Load(&version)
+	return version, err
+}
+
 func (d *runtimeDB) queryLatestVersions() (map[string]string, error) {
 	var rows []struct {
 		Component     string `db:"component"`

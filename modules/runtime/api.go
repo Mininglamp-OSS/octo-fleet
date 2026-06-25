@@ -228,9 +228,7 @@ func (rt *Runtime) register(c *wkhttp.Context) {
 			status = "online"
 		}
 
-		metaMap := map[string]interface{}{
-			"cli_version": req.CLIVersion,
-		}
+		metaMap := map[string]interface{}{}
 		if len(r.Agents) > 0 {
 			metaMap["agents"] = r.Agents
 		}
@@ -299,9 +297,18 @@ func (rt *Runtime) register(c *wkhttp.Context) {
 
 	// 升级关单：注册成功后检查是否有匹配的升级任务. v3.3.1 §C.2: scoped
 	// by (space, owner) so cross-owner same-daemon_id can't complete
-	// another owner's daemon-cli upgrade.
-	if req.CLIVersion != "" {
-		rt.db.completeUpgradeIfMatched(req.DaemonID, spaceID, ownerUID, "octo-daemon", req.CLIVersion)
+	// another owner's daemon-cli upgrade. 版本与 gate / hint 同源 —— 用本次
+	// 上报的 octo-daemon device_component 版本(npm 实装版本)关单,npm install
+	// -g 完成后 daemon 重新 register 上报新版本即匹配 to_version 关单。
+	daemonVersion := ""
+	for _, dc := range req.DeviceComponents {
+		if dc.Name == componentDaemon {
+			daemonVersion = dc.Version
+			break
+		}
+	}
+	if daemonVersion != "" {
+		rt.db.completeUpgradeIfMatched(req.DaemonID, spaceID, ownerUID, componentDaemon, daemonVersion)
 	}
 
 	ResponseData(c, registerResp{Runtimes: registered})
@@ -730,24 +737,13 @@ func (rt *Runtime) list(c *wkhttp.Context) {
 	// version npm reports (device_component.reported_version, surfaced in the
 	// device's components), NOT the running binary's ldflags version — the
 	// upgrade is `npm install -g`, so the npm-installed version is what decides
-	// whether an update is available. latest stays runtime_latest_version.
+	// whether an update is available. The upgrade gate reads the same source
+	// (queryDaemonReportedVersion), so hint and gate never disagree.
 	daemonVersionHints := make(map[int64]daemonVersionHint)
-	if daemonLatest := latestVersions["octo-daemon"]; daemonLatest != "" {
-		for id, dv := range devices {
-			current := ""
-			for _, comp := range dv.Components {
-				if comp.Name == "octo-daemon" {
-					current = comp.Version
-					break
-				}
-			}
-			if current != "" && isVersionOlder(current, daemonLatest) {
-				daemonVersionHints[id] = daemonVersionHint{
-					HasUpdate:     true,
-					LatestVersion: daemonLatest,
-					Current:       current,
-				}
-			}
+	daemonLatest := latestVersions["octo-daemon"]
+	for id, dv := range devices {
+		if hint, ok := computeDaemonHint(dv.Components, daemonLatest); ok {
+			daemonVersionHints[id] = hint
 		}
 	}
 
