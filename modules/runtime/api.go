@@ -715,11 +715,42 @@ func (rt *Runtime) list(c *wkhttp.Context) {
 		activeUpgrades = append(activeUpgrades, item)
 	}
 
+	// Collect distinct device ids from the runtime rows, then load each
+	// device + its reported component versions (keyed by device.id) so the
+	// page can show device name / id / os version + per-component versions.
+	// last_seen_at on the device is the max across its runtimes, not the
+	// device table's own column.
+	deviceIDSet := make(map[int64]struct{})
+	deviceLastSeen := make(map[int64]time.Time)
+	for _, m := range models {
+		if m.DeviceID <= 0 {
+			continue
+		}
+		deviceIDSet[m.DeviceID] = struct{}{}
+		if t := time.Time(m.LastSeenAt); t.After(deviceLastSeen[m.DeviceID]) {
+			deviceLastSeen[m.DeviceID] = t
+		}
+	}
+	deviceIDs := make([]int64, 0, len(deviceIDSet))
+	for id := range deviceIDSet {
+		deviceIDs = append(deviceIDs, id)
+	}
+	devices, err := rt.db.queryDevicesWithComponents(deviceIDs)
+	if err != nil {
+		rt.Warn("query devices with components failed", zap.Error(err))
+		devices = map[int64]deviceView{}
+	}
+	for id, dv := range devices {
+		dv.LastSeenAt = formatTime(deviceLastSeen[id])
+		devices[id] = dv
+	}
+
 	ResponseData(c, runtimesView{
 		Runtimes:           list,
 		VersionHints:       versionHints,
 		DaemonVersionHints: daemonVersionHints,
 		ActiveUpgrades:     activeUpgrades,
+		Devices:            devices,
 	})
 }
 
@@ -882,6 +913,7 @@ func toRuntimeResp(m *agentRuntimeModel) runtimeResp {
 		ID:          m.Id,
 		SpaceID:     m.SpaceID,
 		DaemonID:    m.DaemonID,
+		DeviceID:    m.DeviceID,
 		Name:        m.Name,
 		Provider:    m.Provider,
 		RuntimeMode: m.RuntimeMode,

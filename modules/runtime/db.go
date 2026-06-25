@@ -209,6 +209,69 @@ func (d *runtimeDB) deleteByID(id int64) error {
 	return err
 }
 
+// queryDevicesWithComponents loads the device rows + their reported component
+// versions for the given device ids, keyed by device.id (PK). Two queries joined
+// in Go; components carry only reported_version (the desired_* / state columns
+// are control-plane state, not surfaced here).
+func (d *runtimeDB) queryDevicesWithComponents(deviceIDs []int64) (map[int64]deviceView, error) {
+	result := make(map[int64]deviceView)
+	if len(deviceIDs) == 0 {
+		return result, nil
+	}
+
+	var devices []struct {
+		ID         int64  `db:"id"`
+		DeviceUUID string `db:"device_uuid"`
+		Hostname   string `db:"hostname"`
+		OS         string `db:"os"`
+		Arch       string `db:"arch"`
+		OSVersion  string `db:"os_version"`
+		Status     string `db:"status"`
+	}
+	_, err := d.session.Select("id", "device_uuid", "hostname", "os", "arch", "os_version", "status").
+		From("device").Where("id IN ?", deviceIDs).Load(&devices)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, dev := range devices {
+		result[dev.ID] = deviceView{
+			DeviceID:   dev.ID,
+			DeviceUUID: dev.DeviceUUID,
+			Name:       dev.Hostname,
+			OS:         dev.OS,
+			Arch:       dev.Arch,
+			OSVersion:  dev.OSVersion,
+			Status:     dev.Status,
+			Components: []deviceComponentView{},
+		}
+	}
+
+	var components []struct {
+		DeviceID        int64  `db:"device_id"`
+		Name            string `db:"name"`
+		ReportedVersion string `db:"reported_version"`
+	}
+	_, err = d.session.Select("device_id", "name", "reported_version").
+		From("device_component").Where("device_id IN ?", deviceIDs).Load(&components)
+	if err != nil {
+		return nil, err
+	}
+	for _, comp := range components {
+		dv, ok := result[comp.DeviceID]
+		if !ok {
+			continue
+		}
+		dv.Components = append(dv.Components, deviceComponentView{
+			Name:    comp.Name,
+			Version: comp.ReportedVersion,
+		})
+		result[comp.DeviceID] = dv
+	}
+
+	return result, nil
+}
+
 func (d *runtimeDB) queryLatestVersions() (map[string]string, error) {
 	var rows []struct {
 		Component     string `db:"component"`
@@ -228,8 +291,8 @@ func (d *runtimeDB) queryLatestVersions() (map[string]string, error) {
 // upsertLatestVersion inserts or updates a component's latest version + release_meta.
 // Source is now the internal admin endpoint (POST /v1/internal/runtime-latest-versions);
 // the COS version syncer was removed, so this table is maintained manually.
-// 空 releaseMeta 表示"不更新 release_meta"——保留已有值(避免省略该字段时清空
-// daemon 自升级所需的 assets/checksums)。新行 release_meta 默认 ''。
+// 空 releaseMeta 表示"不更新 release_meta"——保留已有值。新行 release_meta 默认 ''。
+// (release_meta 仅作记录留存;daemon 升级已改为 npm install,不再消费 assets/checksums。)
 func (d *runtimeDB) upsertLatestVersion(component, latestVersion, releaseMeta string) error {
 	_, err := d.session.InsertBySql(
 		`INSERT INTO runtime_latest_version (component, latest_version, release_meta)
