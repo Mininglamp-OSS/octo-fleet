@@ -567,7 +567,7 @@ func (rt *Runtime) deregister(c *wkhttp.Context) {
 
 // list godoc
 // @Summary      List runtimes in a space
-// @Description  Aggregate view for the runtime management UI: the caller's runtimes plus per-runtime / per-daemon update hints and in-progress upgrades. Single object (not paginated); the set is small (one user's devices).
+// @Description  Aggregate view for the runtime management UI: the caller's runtimes plus per-runtime update hints, per-device daemon update hints, in-progress upgrades, and a device map (keyed by device.id). Single object (not paginated); the set is small (one user's devices).
 // @Tags         runtime
 // @ID           runtime.list
 // @Accept       json
@@ -707,6 +707,10 @@ func (rt *Runtime) list(c *wkhttp.Context) {
 	deviceLastSeen := make(map[int64]time.Time)
 	deviceDaemon := make(map[int64]string)
 	for _, m := range models {
+		// Migration tail: pre-device-entity daemons (device_id=0, not yet
+		// re-registered with a device + component inventory) drop out here, so
+		// they get no device entry and no daemon-update hint until they
+		// re-register and report their octo-daemon component.
 		if m.DeviceID <= 0 {
 			continue
 		}
