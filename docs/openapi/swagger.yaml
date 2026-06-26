@@ -222,6 +222,59 @@ components:
           type: array
           uniqueItems: false
       type: object
+    runtime.deviceComponentReq:
+      properties:
+        component_key:
+          description: install id, e.g. "@mininglamp-oss/octo-daemon"
+          type: string
+        name:
+          description: logical name, e.g. "octo-daemon"
+          type: string
+        type:
+          description: package-manager / runtime type, e.g. "nodejs"
+          type: string
+        version:
+          type: string
+      type: object
+    runtime.deviceComponentView:
+      properties:
+        name:
+          type: string
+        version:
+          type: string
+      type: object
+    runtime.deviceView:
+      properties:
+        arch:
+          type: string
+        components:
+          items:
+            $ref: '#/components/schemas/runtime.deviceComponentView'
+          type: array
+          uniqueItems: false
+        daemon_id:
+          description: the daemon channel for this device in the requested space (latest-seen
+            runtime's daemon_id)
+          type: string
+        device_id:
+          description: device.id (PK)
+          type: integer
+        device_uuid:
+          description: daemon-reported persistent identity
+          type: string
+        last_seen_at:
+          description: max last_seen_at across this device's runtimes
+          type: string
+        name:
+          description: hostname
+          type: string
+        os:
+          type: string
+        os_version:
+          type: string
+        status:
+          type: string
+      type: object
     runtime.heartbeatResp:
       properties:
         managed_bots:
@@ -289,11 +342,17 @@ components:
       type: object
     runtime.registerReq:
       properties:
-        cli_version:
-          type: string
         daemon_id:
           type: string
+        device_components:
+          description: machine-level component inventory (npm -g etc.); octo-daemon
+            version sourced from here
+          items:
+            $ref: '#/components/schemas/runtime.deviceComponentReq'
+          type: array
+          uniqueItems: false
         device_info:
+          description: JSON string; carries device_id + os/arch/os_version
           type: string
         device_name:
           type: string
@@ -378,6 +437,9 @@ components:
           type: string
         daemon_id:
           type: string
+        device_id:
+          description: device.id (PK); 0 = not linked. Key into runtimesView.Devices.
+          type: integer
         device_info:
           type: string
         device_name:
@@ -415,6 +477,12 @@ components:
         daemon_version_hints:
           additionalProperties:
             $ref: '#/components/schemas/runtime.daemonVersionHint'
+          description: keyed by device.id (1:1 with Devices)
+          type: object
+        devices:
+          additionalProperties:
+            $ref: '#/components/schemas/runtime.deviceView'
+          description: keyed by device.id (PK)
           type: object
         runtimes:
           items:
@@ -443,13 +511,25 @@ components:
       type: object
     runtime.upgradeInitReq:
       properties:
+        api_key:
+          type: string
         component:
-          description: 默认 "octo-daemon"；插件填 "octo"
+          description: 默认 "octo-daemon"；插件填 "octo" / "cc-octo"
           type: string
         daemon_id:
           type: string
+        gateway_url:
+          description: |-
+            cc-octo 一键安装专用：LLM 网关 + key。仅在 cc-octo install 时必填。
+            绝不入库 / 不进 metadata —— 受理后只进内存 transient store 中转给 daemon。
+          type: string
+        model:
+          description: |-
+            Optional LLM model id (gateway-level). Relayed like the gateway/key —
+            never persisted — and passed to cc-channel-octo configure --model.
+          type: string
         runtime_id:
-          description: 插件分支必填：对应 openclaw runtime 的 id
+          description: 插件分支必填：对应 runtime 的 id
           type: integer
         space_id:
           type: string
@@ -489,6 +569,10 @@ components:
         has_update:
           type: boolean
         latest_version:
+          type: string
+        plugin_install_version:
+          description: set only when the provider's adapter plugin is NOT installed
+            but a latest version is published; lets the UI gate one-click install
           type: string
         plugin_latest_version:
           type: string
@@ -1014,8 +1098,9 @@ paths:
   /runtimes:
     get:
       description: 'Aggregate view for the runtime management UI: the caller''s runtimes
-        plus per-runtime / per-daemon update hints and in-progress upgrades. Single
-        object (not paginated); the set is small (one user''s devices).'
+        plus per-runtime update hints, per-device daemon update hints, in-progress
+        upgrades, and a device map (keyed by device.id). Single object (not paginated);
+        the set is small (one user''s devices).'
       operationId: runtime.list
       parameters:
       - description: Space ID
