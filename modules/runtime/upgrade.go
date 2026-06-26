@@ -67,9 +67,16 @@ func (rt *Runtime) upgradeInit(c *wkhttp.Context) {
 	}
 
 	// 2. 查 daemon
+	// Pin the row deterministically: prefer the linked device (device_id>0)
+	// over a stale pre-device-entity sibling (device_id=0), so the upgrade gate
+	// resolves the daemon's version against the same device the GET /runtimes
+	// hint uses (the hint skips device_id=0 rows). Without ORDER BY, an
+	// arbitrary device_id=0 sibling could yield an empty reported_version and
+	// enqueue a spurious upgrade on an already-latest daemon.
 	var daemon agentRuntimeModel
 	_, err := rt.db.session.Select("*").From("agent_runtime").
 		Where("space_id=? AND daemon_id=? AND owner_uid=?", req.SpaceID, req.DaemonID, loginUID).
+		OrderDir("device_id", false).
 		Limit(1).Load(&daemon)
 	if err != nil || daemon.DaemonID == "" {
 		responseError(c, errcode.Forbidden)
