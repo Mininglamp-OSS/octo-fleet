@@ -67,9 +67,16 @@ func (rt *Runtime) upgradeInit(c *wkhttp.Context) {
 	}
 
 	// 2. 查 daemon
+	// Pin the row deterministically: prefer the linked device (device_id>0)
+	// over a stale pre-device-entity sibling (device_id=0), so the upgrade gate
+	// resolves the daemon's version against the same device the GET /runtimes
+	// hint uses (the hint skips device_id=0 rows). Without ORDER BY, an
+	// arbitrary device_id=0 sibling could yield an empty reported_version and
+	// enqueue a spurious upgrade on an already-latest daemon.
 	var daemon agentRuntimeModel
 	_, err := rt.db.session.Select("*").From("agent_runtime").
 		Where("space_id=? AND daemon_id=? AND owner_uid=?", req.SpaceID, req.DaemonID, loginUID).
+		OrderDir("device_id", false).
 		Limit(1).Load(&daemon)
 	if err != nil || daemon.DaemonID == "" {
 		responseError(c, errcode.Forbidden)
@@ -175,24 +182,14 @@ func (rt *Runtime) createComponentUpgradeTask(c *wkhttp.Context, loginUID string
 
 // octo-daemon 升级：现有逻辑
 func (rt *Runtime) createDaemonUpgradeTask(c *wkhttp.Context, loginUID string, req *upgradeInitReq, daemon *agentRuntimeModel) {
-	// OS 检查
-	var deviceInfo struct {
-		OS   string `json:"os"`
-		Arch string `json:"arch"`
-	}
-	json.Unmarshal([]byte(daemon.DeviceInfo), &deviceInfo)
-	if deviceInfo.OS == "windows" {
-		responseError(c, errcode.Validation)
-		return
-	}
-
-	// 查最新版本 + release_meta
+	// daemon 升级与 cc-octo 插件同模型:不再从 GitHub 取二进制 / 不做 os-arch
+	// asset 匹配 / 不算 checksum —— 只下发升级任务,daemon 端走 npm install -g
+	// @mininglamp-oss/octo-daemon@<to_version>,arch/os 选择与完整性校验交给 npm。
 	var versionRow struct {
 		LatestVersion string `db:"latest_version"`
-		ReleaseMeta   string `db:"release_meta"`
 	}
 	_, err := rt.db.session.SelectBySql(
-		"SELECT latest_version, COALESCE(release_meta,'') as release_meta FROM runtime_latest_version WHERE component=?",
+		"SELECT latest_version FROM runtime_latest_version WHERE component=?",
 		componentDaemon,
 	).Load(&versionRow)
 	if err != nil || versionRow.LatestVersion == "" {
@@ -200,12 +197,15 @@ func (rt *Runtime) createDaemonUpgradeTask(c *wkhttp.Context, loginUID string, r
 		return
 	}
 
-	// 当前版本
-	var metaJSON struct {
-		CLIVersion string `json:"cli_version"`
+	// 当前版本:与 GET /runtimes 的 daemon_version_hints 同源 —— 取该 device
+	// 上报的 octo-daemon device_component.reported_version(npm 实装版本),
+	// 不再用 metadata.cli_version(运行中二进制 ldflags 版本)。两处同源,
+	// 避免「提示有更新但受理 409」以及 stale cli_version 无条件重升。
+	fromVersion, err := rt.db.queryDaemonReportedVersion(daemon.DeviceID)
+	if err != nil {
+		responseError(c, errcode.InternalError)
+		return
 	}
-	json.Unmarshal([]byte(daemon.Metadata), &metaJSON)
-	fromVersion := metaJSON.CLIVersion
 
 	if fromVersion != "" && fromVersion == versionRow.LatestVersion {
 		responseError(c, errcode.Conflict)
@@ -218,37 +218,6 @@ func (rt *Runtime) createDaemonUpgradeTask(c *wkhttp.Context, loginUID string, r
 		}
 	}
 
-	// 匹配 asset
-	if versionRow.ReleaseMeta == "" {
-		responseError(c, errcode.Validation)
-		return
-	}
-	var meta releaseMetaJSON
-	if err := json.Unmarshal([]byte(versionRow.ReleaseMeta), &meta); err != nil {
-		rt.Error("parse release_meta", zap.Error(err))
-		// corrupt server-stored release_meta, not client input → 500
-		responseError(c, errcode.InternalError)
-		return
-	}
-	osName := normalizeOS(deviceInfo.OS)
-	archName := normalizeArch(deviceInfo.Arch)
-	var matchedAsset *releaseAssetJSON
-	for i, a := range meta.Assets {
-		if a.Kind == "archive" && a.OS == osName && a.Arch == archName {
-			matchedAsset = &meta.Assets[i]
-			break
-		}
-	}
-	if matchedAsset == nil {
-		responseError(c, errcode.Validation)
-		return
-	}
-	checksum := meta.Checksums[matchedAsset.Name]
-	if checksum == "" {
-		responseError(c, errcode.Validation)
-		return
-	}
-
 	rt.insertUpgradeTask(c, insertTaskArgs{
 		SpaceID:     req.SpaceID,
 		DaemonID:    req.DaemonID,
@@ -256,8 +225,8 @@ func (rt *Runtime) createDaemonUpgradeTask(c *wkhttp.Context, loginUID string, r
 		Component:   componentDaemon,
 		FromVersion: fromVersion,
 		ToVersion:   versionRow.LatestVersion,
-		DownloadURL: matchedAsset.URL,
-		Checksum:    checksum,
+		DownloadURL: "",
+		Checksum:    "",
 		Metadata:    "",
 	})
 }
@@ -819,26 +788,6 @@ func (d *runtimeDB) timeoutStaleUpgrades(activeProviders map[string]int) {
 }
 
 // helpers
-
-func normalizeOS(os string) string {
-	switch strings.ToLower(os) {
-	case "macos":
-		return "darwin"
-	default:
-		return strings.ToLower(os)
-	}
-}
-
-func normalizeArch(arch string) string {
-	switch strings.ToLower(arch) {
-	case "x86_64", "x64":
-		return "amd64"
-	case "aarch64":
-		return "arm64"
-	default:
-		return strings.ToLower(arch)
-	}
-}
 
 func snowflakeID() int64 {
 	return time.Now().UnixNano()

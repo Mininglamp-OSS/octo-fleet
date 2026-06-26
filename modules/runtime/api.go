@@ -228,9 +228,7 @@ func (rt *Runtime) register(c *wkhttp.Context) {
 			status = "online"
 		}
 
-		metaMap := map[string]interface{}{
-			"cli_version": req.CLIVersion,
-		}
+		metaMap := map[string]interface{}{}
 		if len(r.Agents) > 0 {
 			metaMap["agents"] = r.Agents
 		}
@@ -299,9 +297,18 @@ func (rt *Runtime) register(c *wkhttp.Context) {
 
 	// 升级关单：注册成功后检查是否有匹配的升级任务. v3.3.1 §C.2: scoped
 	// by (space, owner) so cross-owner same-daemon_id can't complete
-	// another owner's daemon-cli upgrade.
-	if req.CLIVersion != "" {
-		rt.db.completeUpgradeIfMatched(req.DaemonID, spaceID, ownerUID, "octo-daemon", req.CLIVersion)
+	// another owner's daemon-cli upgrade. 版本与 gate / hint 同源 —— 用本次
+	// 上报的 octo-daemon device_component 版本(npm 实装版本)关单,npm install
+	// -g 完成后 daemon 重新 register 上报新版本即匹配 to_version 关单。
+	daemonVersion := ""
+	for _, dc := range req.DeviceComponents {
+		if dc.Name == componentDaemon {
+			daemonVersion = dc.Version
+			break
+		}
+	}
+	if daemonVersion != "" {
+		rt.db.completeUpgradeIfMatched(req.DaemonID, spaceID, ownerUID, componentDaemon, daemonVersion)
 	}
 
 	ResponseData(c, registerResp{Runtimes: registered})
@@ -560,7 +567,7 @@ func (rt *Runtime) deregister(c *wkhttp.Context) {
 
 // list godoc
 // @Summary      List runtimes in a space
-// @Description  Aggregate view for the runtime management UI: the caller's runtimes plus per-runtime / per-daemon update hints and in-progress upgrades. Single object (not paginated); the set is small (one user's devices).
+// @Description  Aggregate view for the runtime management UI: the caller's runtimes plus per-runtime update hints, per-device daemon update hints, in-progress upgrades, and a device map (keyed by device.id). Single object (not paginated); the set is small (one user's devices).
 // @Tags         runtime
 // @ID           runtime.list
 // @Accept       json
@@ -648,32 +655,6 @@ func (rt *Runtime) list(c *wkhttp.Context) {
 		}
 	}
 
-	// Build daemon version hints per daemon_id
-	daemonVersionHints := make(map[string]daemonVersionHint)
-	if latestVersions != nil {
-		if daemonLatest, ok := latestVersions["octo-daemon"]; ok && daemonLatest != "" {
-			seen := make(map[string]bool)
-			for _, r := range list {
-				if seen[r.DaemonID] {
-					continue
-				}
-				seen[r.DaemonID] = true
-				var meta map[string]interface{}
-				if r.Metadata != "" {
-					json.Unmarshal([]byte(r.Metadata), &meta)
-				}
-				cliVer, _ := meta["cli_version"].(string)
-				if cliVer != "" && isVersionOlder(cliVer, daemonLatest) {
-					daemonVersionHints[r.DaemonID] = daemonVersionHint{
-						HasUpdate:     true,
-						LatestVersion: daemonLatest,
-						Current:       cliVer,
-					}
-				}
-			}
-		}
-	}
-
 	// 查询每个 (daemon_id, component) 最新的进行中升级任务
 	// 改成数组响应，供前端按 runtime_id / daemon_id + component 恢复按钮态。
 	// failed/timeout 是终态，不占 active slot —— 用户应当能立刻重新点 Upgrade
@@ -715,11 +696,67 @@ func (rt *Runtime) list(c *wkhttp.Context) {
 		activeUpgrades = append(activeUpgrades, item)
 	}
 
+	// Collect distinct device ids from the runtime rows, then load each
+	// device + its reported component versions (keyed by device.id) so the
+	// page can show device name / id / os version + per-component versions.
+	// last_seen_at on the device is the max across its runtimes, not the
+	// device table's own column. daemon_id is the channel to use for upgrades
+	// on this device in the requested space; within a space device↔daemon is
+	// effectively 1:1, and we tie-break on the latest-seen runtime.
+	deviceIDSet := make(map[int64]struct{})
+	deviceLastSeen := make(map[int64]time.Time)
+	deviceDaemon := make(map[int64]string)
+	for _, m := range models {
+		// Migration tail: pre-device-entity daemons (device_id=0, not yet
+		// re-registered with a device + component inventory) drop out here, so
+		// they get no device entry and no daemon-update hint until they
+		// re-register and report their octo-daemon component.
+		if m.DeviceID <= 0 {
+			continue
+		}
+		deviceIDSet[m.DeviceID] = struct{}{}
+		t := time.Time(m.LastSeenAt)
+		if prev, seen := deviceLastSeen[m.DeviceID]; !seen || t.After(prev) {
+			deviceLastSeen[m.DeviceID] = t
+			deviceDaemon[m.DeviceID] = m.DaemonID
+		}
+	}
+	deviceIDs := make([]int64, 0, len(deviceIDSet))
+	for id := range deviceIDSet {
+		deviceIDs = append(deviceIDs, id)
+	}
+	devices, err := rt.db.queryDevicesWithComponents(deviceIDs)
+	if err != nil {
+		rt.Warn("query devices with components failed", zap.Error(err))
+		devices = map[int64]deviceView{}
+	}
+	for id, dv := range devices {
+		dv.LastSeenAt = formatTime(deviceLastSeen[id])
+		dv.DaemonID = deviceDaemon[id]
+		devices[id] = dv
+	}
+
+	// Build daemon version hints per device.id (1:1 with the devices map).
+	// octo-daemon is a machine-level npm component, so "current" is the
+	// version npm reports (device_component.reported_version, surfaced in the
+	// device's components), NOT the running binary's ldflags version — the
+	// upgrade is `npm install -g`, so the npm-installed version is what decides
+	// whether an update is available. The upgrade gate reads the same source
+	// (queryDaemonReportedVersion), so hint and gate never disagree.
+	daemonVersionHints := make(map[int64]daemonVersionHint)
+	daemonLatest := latestVersions["octo-daemon"]
+	for id, dv := range devices {
+		if hint, ok := computeDaemonHint(dv.Components, daemonLatest); ok {
+			daemonVersionHints[id] = hint
+		}
+	}
+
 	ResponseData(c, runtimesView{
 		Runtimes:           list,
 		VersionHints:       versionHints,
 		DaemonVersionHints: daemonVersionHints,
 		ActiveUpgrades:     activeUpgrades,
+		Devices:            devices,
 	})
 }
 
@@ -882,6 +919,7 @@ func toRuntimeResp(m *agentRuntimeModel) runtimeResp {
 		ID:          m.Id,
 		SpaceID:     m.SpaceID,
 		DaemonID:    m.DaemonID,
+		DeviceID:    m.DeviceID,
 		Name:        m.Name,
 		Provider:    m.Provider,
 		RuntimeMode: m.RuntimeMode,

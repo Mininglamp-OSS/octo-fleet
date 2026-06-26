@@ -25,11 +25,10 @@ type agentRuntimeModel struct {
 type registerReq struct {
 	DaemonID            string               `json:"daemon_id"`
 	DeviceName          string               `json:"device_name"`
-	DeviceInfo          string               `json:"device_info"` // JSON string; carries device_id + os/arch/os_version
-	CLIVersion          string               `json:"cli_version"`
+	DeviceInfo          string               `json:"device_info"`                     // JSON string; carries device_id + os/arch/os_version
 	HeartbeatIntervalMs int64                `json:"heartbeat_interval_ms,omitempty"` // daemon-reported, 0 = unset
 	Runtimes            []runtimeReq         `json:"runtimes"`
-	DeviceComponents    []deviceComponentReq `json:"device_components"` // machine-level component inventory (npm -g etc.)
+	DeviceComponents    []deviceComponentReq `json:"device_components"` // machine-level component inventory (npm -g etc.); octo-daemon version sourced from here
 }
 
 // deviceInfoJSON is the parsed shape of registerReq.DeviceInfo. device_id here
@@ -78,6 +77,7 @@ type runtimeResp struct {
 	ID          int64  `json:"id"`
 	SpaceID     string `json:"space_id"`
 	DaemonID    string `json:"daemon_id"`
+	DeviceID    int64  `json:"device_id"` // device.id (PK); 0 = not linked. Key into runtimesView.Devices.
 	Name        string `json:"name"`
 	Provider    string `json:"provider"`
 	RuntimeMode string `json:"runtime_mode"`
@@ -219,20 +219,46 @@ type versionHint struct {
 	PluginInstallVersion string `json:"plugin_install_version,omitempty"` // set only when the provider's adapter plugin is NOT installed but a latest version is published; lets the UI gate one-click install
 }
 
-// daemonVersionHint flags an available daemon (CLI) update (per daemon_id).
+// daemonVersionHint flags an available daemon (octo-daemon) update (per device.id).
 type daemonVersionHint struct {
 	HasUpdate     bool   `json:"has_update,omitempty"`
 	LatestVersion string `json:"latest_version,omitempty"`
 	Current       string `json:"current,omitempty"`
 }
 
+// deviceComponentView is one machine-level component's reported version
+// (device_component.reported_version), surfaced for display in GET /runtimes.
+type deviceComponentView struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+}
+
+// deviceView is the machine (device) entity surfaced in GET /runtimes so the
+// page can show device name / id / os version + per-component versions without
+// re-parsing each runtime's raw device_info blob. Associated to runtimes via
+// device_id (= device.id PK); device_uuid is the daemon-reported identity, for
+// display only.
+type deviceView struct {
+	DeviceID   int64                 `json:"device_id"`   // device.id (PK)
+	DeviceUUID string                `json:"device_uuid"` // daemon-reported persistent identity
+	DaemonID   string                `json:"daemon_id"`   // the daemon channel for this device in the requested space (latest-seen runtime's daemon_id)
+	Name       string                `json:"name"`        // hostname
+	OS         string                `json:"os"`
+	Arch       string                `json:"arch"`
+	OSVersion  string                `json:"os_version"`
+	Status     string                `json:"status"`
+	LastSeenAt string                `json:"last_seen_at" swaggertype:"string,date-time"` // max last_seen_at across this device's runtimes
+	Components []deviceComponentView `json:"components"`
+}
+
 // runtimesView is the GET /runtimes aggregate (list + per-id/per-daemon
 // update hints + in-progress upgrades). Single-object envelope, not paginated.
 type runtimesView struct {
-	Runtimes           []runtimeResp                `json:"runtimes"`
-	VersionHints       map[int64]versionHint        `json:"version_hints"`
-	DaemonVersionHints map[string]daemonVersionHint `json:"daemon_version_hints"`
-	ActiveUpgrades     []activeUpgradeItem          `json:"active_upgrades"`
+	Runtimes           []runtimeResp               `json:"runtimes"`
+	VersionHints       map[int64]versionHint       `json:"version_hints"`
+	DaemonVersionHints map[int64]daemonVersionHint `json:"daemon_version_hints"` // keyed by device.id (1:1 with Devices)
+	ActiveUpgrades     []activeUpgradeItem         `json:"active_upgrades"`
+	Devices            map[int64]deviceView        `json:"devices"` // keyed by device.id (PK)
 }
 
 // upgradeInitResp is the POST /upgrades response.
