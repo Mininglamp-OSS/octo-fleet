@@ -9,7 +9,7 @@ require (
 	github.com/judwhite/go-svc v1.2.1
 	github.com/spf13/viper v1.16.0
 	github.com/stretchr/testify v1.8.3
-	go.uber.org/zap v1.24.0
+	go.uber.org/zap v1.28.0
 )
 
 require (
@@ -99,7 +99,7 @@ require (
 	go.opentelemetry.io/otel/metric v0.17.0 // indirect
 	go.opentelemetry.io/otel/trace v0.17.0 // indirect
 	go.uber.org/atomic v1.9.0 // indirect
-	go.uber.org/multierr v1.8.0 // indirect
+	go.uber.org/multierr v1.10.0 // indirect
 	golang.org/x/arch v0.3.0 // indirect
 	golang.org/x/crypto v0.19.0 // indirect
 	golang.org/x/net v0.12.0 // indirect
