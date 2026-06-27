@@ -208,6 +208,51 @@ func (d *runtimeDB) deleteByID(id int64) error {
 	return err
 }
 
+// deleteStaleDaemons GCs daemon rows that have been offline past the threshold.
+// Mirrors deleteStaleOffline (agent_runtime). A machine that re-registers with a
+// fresh device_uuid/daemon_id (reinstall) leaves its old daemon row offline
+// forever otherwise — this clears that zombie green dot once it ages out.
+func (d *runtimeDB) deleteStaleDaemons(threshold time.Duration) (int64, error) {
+	cutoff := time.Now().Add(-threshold)
+	result, err := d.session.DeleteFrom("daemon").
+		Where("status=? AND last_seen_at < ?", "offline", cutoff).
+		Exec()
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+// deleteOrphanDevices GCs device rows no longer referenced by any daemon or
+// agent_runtime row (e.g. a reinstall produced a new device_uuid and the old
+// daemon row was already GC'd). Their device_component rows go too. device has
+// no status/last_seen of its own (three-tier model), so reachability — not
+// staleness — is the GC criterion; only run AFTER deleteStaleDaemons so an
+// offline-but-not-yet-aged daemon still pins its device.
+func (d *runtimeDB) deleteOrphanDevices() (int64, error) {
+	result, err := d.session.DeleteBySql(
+		`DELETE FROM device
+		  WHERE id NOT IN (SELECT device_id FROM daemon WHERE device_id > 0)
+		    AND id NOT IN (SELECT device_id FROM agent_runtime WHERE device_id > 0)`,
+	).Exec()
+	if err != nil {
+		return 0, err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if n > 0 {
+		// Sweep component rows whose device is now gone. Best-effort: a failure
+		// here only leaves detached component rows, not a correctness issue.
+		_, _ = d.session.DeleteBySql(
+			`DELETE FROM device_component
+			  WHERE device_id NOT IN (SELECT id FROM device)`,
+		).Exec()
+	}
+	return n, nil
+}
+
 // queryDevicesWithComponents loads the device rows + their reported component
 // versions for the given device ids, keyed by device.id (PK). Two queries joined
 // in Go; components carry only reported_version (the desired_* / state columns

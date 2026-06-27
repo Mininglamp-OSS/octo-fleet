@@ -83,3 +83,61 @@ func TestDaemonSweepBeforeRuntimeSweepContinue(t *testing.T) {
 		t.Errorf("runtime sweep continue should not be at the very start of the runtime sweep block")
 	}
 }
+
+// TestRunSweeperGCsDaemonsAndOrphanDevices verifies the GC pass for daemon rows
+// and orphan devices is wired into runSweeper (zombie-device cleanup), and that
+// it runs before the runtime GC's err continue (so a runtime-GC error can't skip
+// it). Order: daemon GC before orphan-device GC (a referenced device must keep
+// its row).
+func TestRunSweeperGCsDaemonsAndOrphanDevices(t *testing.T) {
+	src := mustReadSource(t, "api.go")
+	body := extractFuncBody(t, src, "runSweeper")
+
+	idxDaemonGC := strings.Index(body, "deleteStaleDaemons(")
+	idxOrphanGC := strings.Index(body, "deleteOrphanDevices(")
+	idxRuntimeGC := strings.Index(body, "deleteStaleOffline(")
+
+	if idxDaemonGC < 0 {
+		t.Errorf("runSweeper must invoke deleteStaleDaemons (daemon GC)")
+	}
+	if idxOrphanGC < 0 {
+		t.Errorf("runSweeper must invoke deleteOrphanDevices (orphan device GC)")
+	}
+	if idxRuntimeGC < 0 {
+		t.Fatalf("runSweeper must invoke deleteStaleOffline (runtime GC)")
+	}
+	// daemon GC before orphan device GC
+	if idxDaemonGC >= 0 && idxOrphanGC >= 0 && idxDaemonGC >= idxOrphanGC {
+		t.Errorf("deleteStaleDaemons must run before deleteOrphanDevices; got daemon at %d, orphan at %d", idxDaemonGC, idxOrphanGC)
+	}
+	// daemon + orphan GC before the runtime GC's err continue (place before it)
+	if idxDaemonGC >= idxRuntimeGC || idxOrphanGC >= idxRuntimeGC {
+		t.Errorf("daemon/orphan GC must run before runtime GC (deleteStaleOffline) so its err continue can't skip them")
+	}
+}
+
+// TestDeleteStaleDaemonsFiltersOfflineOnly: the daemon GC SQL must only delete
+// offline rows past the threshold (never an online daemon).
+func TestDeleteStaleDaemonsFiltersOfflineOnly(t *testing.T) {
+	src := mustReadSource(t, "db.go")
+	body := extractFuncBody(t, src, "deleteStaleDaemons")
+	if !strings.Contains(body, "offline") {
+		t.Errorf("deleteStaleDaemons must filter status=offline (never GC an online daemon)")
+	}
+	if !strings.Contains(body, "last_seen_at") {
+		t.Errorf("deleteStaleDaemons must filter by last_seen_at threshold")
+	}
+}
+
+// TestDeleteOrphanDevicesChecksBothReferrers: an orphan device is one referenced
+// by NEITHER daemon NOR agent_runtime — the SQL must check both tables, else a
+// device still hosting runtimes (or daemons) could be wrongly deleted.
+func TestDeleteOrphanDevicesChecksBothReferrers(t *testing.T) {
+	src := mustReadSource(t, "db.go")
+	body := extractFuncBody(t, src, "deleteOrphanDevices")
+	for _, ref := range []string{"daemon", "agent_runtime"} {
+		if !strings.Contains(body, ref) {
+			t.Errorf("deleteOrphanDevices must exclude devices referenced by %q", ref)
+		}
+	}
+}

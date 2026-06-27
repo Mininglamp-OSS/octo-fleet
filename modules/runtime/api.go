@@ -1016,6 +1016,22 @@ func (rt *Runtime) runSweeper() {
 		}
 
 		gcThreshold := 7 * 24 * time.Hour
+
+		// GC stale daemon rows + orphaned devices BEFORE the runtime GC's err
+		// continue, so a runtime-GC error can't skip them. Order matters:
+		// daemons first (a still-referenced device must keep its row), then
+		// orphan devices (now unreferenced by any daemon or runtime).
+		if dd, derr := rt.db.deleteStaleDaemons(gcThreshold); derr != nil {
+			rt.Error("gc offline daemons", zap.Error(derr))
+		} else if dd > 0 {
+			rt.Info("gc'd old offline daemons", zap.Int64("count", dd))
+		}
+		if od, oerr := rt.db.deleteOrphanDevices(); oerr != nil {
+			rt.Error("gc orphan devices", zap.Error(oerr))
+		} else if od > 0 {
+			rt.Info("gc'd orphan devices", zap.Int64("count", od))
+		}
+
 		deleted, err := rt.db.deleteStaleOffline(gcThreshold)
 		if err != nil {
 			rt.Error("gc offline runtimes", zap.Error(err))
