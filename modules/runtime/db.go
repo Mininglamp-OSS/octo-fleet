@@ -225,9 +225,8 @@ func (d *runtimeDB) queryDevicesWithComponents(deviceIDs []int64) (map[int64]dev
 		OS         string `db:"os"`
 		Arch       string `db:"arch"`
 		OSVersion  string `db:"os_version"`
-		Status     string `db:"status"`
 	}
-	_, err := d.session.Select("id", "device_uuid", "hostname", "os", "arch", "os_version", "status").
+	_, err := d.session.Select("id", "device_uuid", "hostname", "os", "arch", "os_version").
 		From("device").Where("id IN ?", deviceIDs).Load(&devices)
 	if err != nil {
 		return nil, err
@@ -241,7 +240,6 @@ func (d *runtimeDB) queryDevicesWithComponents(deviceIDs []int64) (map[int64]dev
 			OS:         dev.OS,
 			Arch:       dev.Arch,
 			OSVersion:  dev.OSVersion,
-			Status:     dev.Status,
 			Components: []deviceComponentView{},
 		}
 	}

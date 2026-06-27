@@ -614,7 +614,7 @@ func (rt *Runtime) daemonHeartbeat(c *wkhttp.Context) {
 
 // list godoc
 // @Summary      List runtimes in a space
-// @Description  Aggregate view for the runtime management UI: the caller's runtimes plus per-runtime update hints, per-device daemon update hints, in-progress upgrades, and a device map (keyed by device.id). Single object (not paginated); the set is small (one user's devices).
+// @Description  Aggregate view for the runtime management UI: the caller's runtimes plus per-runtime update hints, per-device daemon update hints, in-progress upgrades, and a device map (keyed by device.id). The device map and green-dot status now come from the daemon table (daemon process liveness), so empty devices (daemon-only, no runtime) are also listed. Single object (not paginated); the set is small (one user's devices).
 // @Tags         runtime
 // @ID           runtime.list
 // @Accept       json
@@ -743,45 +743,24 @@ func (rt *Runtime) list(c *wkhttp.Context) {
 		activeUpgrades = append(activeUpgrades, item)
 	}
 
-	// Collect distinct device ids from the runtime rows, then load each
-	// device + its reported component versions (keyed by device.id) so the
-	// page can show device name / id / os version + per-component versions.
-	// last_seen_at on the device is the max across its runtimes, not the
-	// device table's own column. daemon_id is the channel to use for upgrades
-	// on this device in the requested space; within a space device↔daemon is
-	// effectively 1:1, and we tie-break on the latest-seen runtime.
-	deviceIDSet := make(map[int64]struct{})
-	deviceLastSeen := make(map[int64]time.Time)
-	deviceDaemon := make(map[int64]string)
-	for _, m := range models {
-		// Migration tail: pre-device-entity daemons (device_id=0, not yet
-		// re-registered with a device + component inventory) drop out here, so
-		// they get no device entry and no daemon-update hint until they
-		// re-register and report their octo-daemon component.
-		if m.DeviceID <= 0 {
-			continue
-		}
-		deviceIDSet[m.DeviceID] = struct{}{}
-		t := time.Time(m.LastSeenAt)
-		if prev, seen := deviceLastSeen[m.DeviceID]; !seen || t.After(prev) {
-			deviceLastSeen[m.DeviceID] = t
-			deviceDaemon[m.DeviceID] = m.DaemonID
-		}
+	// 设备来源 = daemon 表(权威):listDaemonsBySpaceOwner 已按 (space,owner)
+	// scope,空设备(有 daemon 无 runtime)也在内 → 可见。device.id 集合来自
+	// daemon 行的 device_id(非 runtime 行),解"空设备不可见"。
+	daemons, derr := rt.db.listDaemonsBySpaceOwner(spaceID, loginUID)
+	if derr != nil {
+		rt.Error("list daemons", zap.Error(derr))
+		responseError(c, errcode.InternalError)
+		return
 	}
-	deviceIDs := make([]int64, 0, len(deviceIDSet))
-	for id := range deviceIDSet {
-		deviceIDs = append(deviceIDs, id)
-	}
-	devices, err := rt.db.queryDevicesWithComponents(deviceIDs)
+	deviceRows, err := rt.db.queryDevicesWithComponents(deviceIDsFromDaemons(daemons))
 	if err != nil {
 		rt.Warn("query devices with components failed", zap.Error(err))
-		devices = map[int64]deviceView{}
+		deviceRows = map[int64]deviceView{}
 	}
-	for id, dv := range devices {
-		dv.LastSeenAt = formatTime(deviceLastSeen[id])
-		dv.DaemonID = deviceDaemon[id]
-		devices[id] = dv
-	}
+
+	// 注入 daemon 权威 status/last_seen/daemon_id(一台机器单 space/owner 下
+	// device↔daemon 1:1,uk_device_space_owner 保证不冲突)
+	devices := buildDeviceViews(daemons, deviceRows)
 
 	// Build daemon version hints per device.id (1:1 with the devices map).
 	// octo-daemon is a machine-level npm component, so "current" is the
@@ -805,6 +784,47 @@ func (rt *Runtime) list(c *wkhttp.Context) {
 		ActiveUpgrades:     activeUpgrades,
 		Devices:            devices,
 	})
+}
+
+// deviceIDsFromDaemons extracts distinct positive device IDs from daemon rows.
+func deviceIDsFromDaemons(daemons []*daemonModel) []int64 {
+	set := make(map[int64]struct{}, len(daemons))
+	for _, dm := range daemons {
+		if dm.DeviceID > 0 {
+			set[dm.DeviceID] = struct{}{}
+		}
+	}
+	out := make([]int64, 0, len(set))
+	for id := range set {
+		out = append(out, id)
+	}
+	return out
+}
+
+// buildDeviceViews merges daemon rows (接入层: green-dot status + last_seen + daemon_id)
+// with device machine info + component inventory, producing the outward-facing
+// deviceView map keyed by device.id. Daemon drives → empty devices (daemon-only,
+// no runtime) also appear. device↔daemon is 1:1 under a single (space,owner),
+// so injecting by dm.DeviceID does not conflict.
+func buildDeviceViews(daemons []*daemonModel, deviceRows map[int64]deviceView) map[int64]deviceView {
+	out := make(map[int64]deviceView, len(daemons))
+	for _, dm := range daemons {
+		if dm.DeviceID <= 0 {
+			continue
+		}
+		dv, ok := deviceRows[dm.DeviceID]
+		if !ok {
+			// device row missing (should not happen if register created both) —
+			// provide a minimal view using daemon-known fields.
+			dv = deviceView{DeviceID: dm.DeviceID, Components: []deviceComponentView{}}
+		}
+		dv.DeviceID = dm.DeviceID
+		dv.Status = dm.Status
+		dv.LastSeenAt = formatTime(time.Time(dm.LastSeenAt))
+		dv.DaemonID = dm.DaemonID
+		out[dm.DeviceID] = dv
+	}
+	return out
 }
 
 // deleteRuntime godoc
