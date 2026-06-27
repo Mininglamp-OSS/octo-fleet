@@ -77,6 +77,7 @@ func (rt *Runtime) Route(r *wkhttp.WKHttp) {
 		daemon.POST("/bots/:bot_id/ack", rt.ackBot)                            // ack provision result
 		daemon.GET("/providers", rt.listProviders)                   // active runtime-provider catalog
 		daemon.POST("/upgrades/:task_id/report", rt.upgradeReport)   // report upgrade progress
+		daemon.POST("/daemons/heartbeat", rt.daemonHeartbeat)        // daemon-level liveness → device green dot
 	}
 
 	web := r.Group("/v1", auth.Middleware("web"))
@@ -553,6 +554,61 @@ func (rt *Runtime) deregister(c *wkhttp.Context) {
 	}
 
 	rt.Info("daemon deregistered", zap.Int("count", len(req.RuntimeIDs)))
+	ResponseEmpty(c)
+}
+
+// daemonHeartbeat godoc
+// @Summary      Daemon heartbeat
+// @Description  Liveness tick for one daemon (device green dot). Distinct from per-runtime heartbeat; returns envelope success only.
+// @Tags         runtime
+// @ID           runtime.daemon_heartbeat
+// @Accept       json
+// @Produce      json
+// @Security     Bearer
+// @Param        body body daemonHeartbeatReq true "Daemon heartbeat payload"
+// @Success      200 {object} envelope.Data[envelope.EmptyResp] "heartbeat recorded"
+// @Failure      400 {object} envelope.Error "VALIDATION_ERROR"
+// @Failure      401 {object} envelope.Error "AUTH_REQUIRED"
+// @Failure      403 {object} envelope.Error "FORBIDDEN"
+// @Failure      500 {object} envelope.Error "INTERNAL_ERROR"
+// @Router       /daemons/heartbeat [post]
+func (rt *Runtime) daemonHeartbeat(c *wkhttp.Context) {
+	var req daemonHeartbeatReq
+	if err := c.BindJSON(&req); err != nil {
+		responseError(c, errcode.Validation)
+		return
+	}
+	if req.DaemonID == "" {
+		responseError(c, errcode.Validation)
+		return
+	}
+	ownerUID := c.MustGet("uid").(string)
+	spaceID := c.MustGet("space_id").(string)
+
+	intervalMs := clampHeartbeatIntervalMs(req.HeartbeatIntervalMs)
+
+	rows, err := rt.db.touchDaemon(req.DaemonID, spaceID, ownerUID, req.DeviceUUID, intervalMs)
+	if err != nil {
+		rt.Error("touch daemon heartbeat", zap.Error(err), zap.String("daemon_id", req.DaemonID))
+		responseError(c, errcode.InternalError)
+		return
+	}
+	if rows == 0 {
+		// daemon 尚未 register 过(或 (daemon_id,space,owner) 不匹配任何行):
+		// 不创建(register 才建 daemon 行),warn 后仍返成功,避免 daemon
+		// 因 race(心跳早于首次 register 落库)反复报错重试。
+		rt.Warn("daemon heartbeat matched no row (not yet registered?)",
+			zap.String("daemon_id", req.DaemonID), zap.String("owner", ownerUID))
+	}
+
+	// device_uuid 一致性校验:best-effort 旁路 warn,不影响主路径
+	if rows > 0 && req.DeviceUUID != "" {
+		if mismatch, _ := rt.db.daemonDeviceUUIDMismatch(req.DaemonID, spaceID, ownerUID, req.DeviceUUID); mismatch {
+			rt.Warn("daemon-reported device_uuid does not match registered device",
+				zap.String("daemon_id", req.DaemonID), zap.String("reported_uuid", req.DeviceUUID))
+		}
+	}
+
 	ResponseEmpty(c)
 }
 

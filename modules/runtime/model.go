@@ -123,6 +123,14 @@ type upgradeReportReq struct {
 	Error  string `json:"error"`
 }
 
+// daemonHeartbeatReq is the POST /v1/daemons/heartbeat body — daemon-level
+// liveness tick (device green dot), distinct from per-runtime heartbeat.
+type daemonHeartbeatReq struct {
+	DaemonID            string `json:"daemon_id"`
+	DeviceUUID          string `json:"device_uuid"`
+	HeartbeatIntervalMs int64  `json:"heartbeat_interval_ms,omitempty"`
+}
+
 type activeUpgradeItem struct {
 	TaskID      string `json:"task_id"`
 	DaemonID    string `json:"daemon_id"`

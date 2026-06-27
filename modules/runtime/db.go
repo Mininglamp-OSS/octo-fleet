@@ -429,6 +429,23 @@ func (d *runtimeDB) touchDaemon(daemonID, spaceID, ownerUID, deviceUUID string, 
 	return result.RowsAffected()
 }
 
+// daemonDeviceUUIDMismatch checks if the reported device_uuid differs from the
+// one registered for the given (daemon_id, space_id, owner_uid) triple.
+// Returns true when mismatch detected (caller should warn but NOT fail the heartbeat).
+// SQL scoped by daemon_id+space_id+owner_uid to prevent cross-tenant access.
+func (d *runtimeDB) daemonDeviceUUIDMismatch(daemonID, spaceID, ownerUID, reportedUUID string) (bool, error) {
+	var count int64
+	_, err := d.session.SelectBySql(
+		`SELECT COUNT(*) FROM daemon d JOIN device dev ON dev.id = d.device_id
+		 WHERE d.daemon_id=? AND d.space_id=? AND d.owner_uid=? AND dev.device_uuid <> ?`,
+		daemonID, spaceID, ownerUID, reportedUUID,
+	).Load(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 // markStaleDaemonsOffline marks online daemons as offline when their last_seen_at
 // exceeds 3x their heartbeat interval (or 3x defaultIntervalMs when unset).
 func (d *runtimeDB) markStaleDaemonsOffline(defaultIntervalMs int64) (int64, error) {
