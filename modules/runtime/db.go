@@ -306,7 +306,7 @@ func (d *runtimeDB) queryLatestVersions() (map[string]string, error) {
 // upsertLatestVersion inserts or updates a component's latest version + release_meta.
 // Source is now the internal admin endpoint (POST /v1/internal/runtime-latest-versions);
 // the COS version syncer was removed, so this table is maintained manually.
-// 空 releaseMeta 表示"不更新 release_meta"——保留已有值。新行 release_meta 默认 ''。
+// 空 releaseMeta 表示"不更新 release_meta"——保留已有值。新行 release_meta 默认 ”。
 // (release_meta 仅作记录留存;daemon 升级已改为 npm install,不再消费 assets/checksums。)
 func (d *runtimeDB) upsertLatestVersion(component, latestVersion, releaseMeta string) error {
 	_, err := d.session.InsertBySql(

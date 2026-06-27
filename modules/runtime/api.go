@@ -67,23 +67,23 @@ func (rt *Runtime) Route(r *wkhttp.WKHttp) {
 	// share the /v1 prefix; gin routes by method + sub-path.
 	daemon := r.Group("/v1", auth.Middleware("daemon"))
 	{
-		daemon.POST("/runtimes", rt.register)                        // register/upsert this daemon's runtimes
-		daemon.POST("/runtimes/verify", rt.verify)                   // validate api_key during daemon config + return bound space
-		daemon.POST("/runtimes/:runtime_id/heartbeat", rt.heartbeat) // liveness + pull pending commands
-		daemon.POST("/runtimes/_deregister", rt.deregister)          // batch mark offline
-		daemon.GET("/runtimes/:runtime_id/events", rt.sseEvents)     // per-runtime SSE reverse-dispatch stream
-		daemon.GET("/bots/:bot_id/provision", rt.fetchBotProvision)            // fetch full bot.provision payload
-		daemon.GET("/upgrades/:task_id/cc-octo-config", rt.fetchCcOctoConfig)  // cc-octo install: fetch gateway+key out of band
-		daemon.POST("/bots/:bot_id/ack", rt.ackBot)                            // ack provision result
-		daemon.GET("/providers", rt.listProviders)                   // active runtime-provider catalog
-		daemon.POST("/upgrades/:task_id/report", rt.upgradeReport)   // report upgrade progress
-		daemon.POST("/daemons/heartbeat", rt.daemonHeartbeat)        // daemon-level liveness → device green dot
+		daemon.POST("/runtimes", rt.register)                                 // register/upsert this daemon's runtimes
+		daemon.POST("/runtimes/verify", rt.verify)                            // validate api_key during daemon config + return bound space
+		daemon.POST("/runtimes/:runtime_id/heartbeat", rt.heartbeat)          // liveness + pull pending commands
+		daemon.POST("/runtimes/_deregister", rt.deregister)                   // batch mark offline
+		daemon.GET("/runtimes/:runtime_id/events", rt.sseEvents)              // per-runtime SSE reverse-dispatch stream
+		daemon.GET("/bots/:bot_id/provision", rt.fetchBotProvision)           // fetch full bot.provision payload
+		daemon.GET("/upgrades/:task_id/cc-octo-config", rt.fetchCcOctoConfig) // cc-octo install: fetch gateway+key out of band
+		daemon.POST("/bots/:bot_id/ack", rt.ackBot)                           // ack provision result
+		daemon.GET("/providers", rt.listProviders)                            // active runtime-provider catalog
+		daemon.POST("/upgrades/:task_id/report", rt.upgradeReport)            // report upgrade progress
+		daemon.POST("/daemons/heartbeat", rt.daemonHeartbeat)                 // daemon-level liveness → device green dot
 	}
 
 	web := r.Group("/v1", auth.Middleware("web"))
 	{
 		web.GET("/runtimes", rt.list)
-		web.POST("/runtimes/llm-models", rt.fetchLLMModels)           // proxy gateway /v1/models for the install model picker
+		web.POST("/runtimes/llm-models", rt.fetchLLMModels) // proxy gateway /v1/models for the install model picker
 		web.DELETE("/runtimes/:runtime_id", rt.deleteRuntime)
 		web.POST("/upgrades", rt.upgradeInit)
 		web.GET("/upgrades/:task_id", rt.upgradeGet)

@@ -214,6 +214,16 @@ components:
         latest_version:
           type: string
       type: object
+    runtime.daemonHeartbeatReq:
+      properties:
+        daemon_id:
+          type: string
+        device_uuid:
+          type: string
+        heartbeat_interval_ms:
+          description: daemon-reported, 0 = unset
+          type: integer
+      type: object
     runtime.deregisterReq:
       properties:
         runtime_ids:
@@ -253,8 +263,8 @@ components:
           type: array
           uniqueItems: false
         daemon_id:
-          description: the daemon channel for this device in the requested space (latest-seen
-            runtime's daemon_id)
+          description: daemon node id for this device in the requested space (from
+            the daemon table, the access-layer authority)
           type: string
         device_id:
           description: device.id (PK)
@@ -263,7 +273,8 @@ components:
           description: daemon-reported persistent identity
           type: string
         last_seen_at:
-          description: max last_seen_at across this device's runtimes
+          description: daemon table last_seen_at (access-layer authority; daemon-level
+            heartbeat)
           type: string
         name:
           description: hostname
@@ -273,6 +284,8 @@ components:
         os_version:
           type: string
         status:
+          description: daemon process liveness (online | offline) — the device green
+            dot, sourced from the daemon table
           type: string
       type: object
     runtime.heartbeatResp:
@@ -440,10 +453,6 @@ components:
         device_id:
           description: device.id (PK); 0 = not linked. Key into runtimesView.Devices.
           type: integer
-        device_info:
-          type: string
-        device_name:
-          type: string
         id:
           type: integer
         last_seen_at:
@@ -1008,6 +1017,58 @@ paths:
       summary: Fetch bot provision payload
       tags:
       - bot
+  /daemons/heartbeat:
+    post:
+      description: Daemon-level liveness tick maintaining the device online indicator
+        (green dot), distinct from the per-runtime heartbeat. Locates the daemon row
+        by (daemon_id from body, space_id + owner_uid from auth) and refreshes its
+        status + last_seen_at. A tick matching no daemon row is warned and still
+        returns success (the daemon must register first; heartbeat never creates the
+        row).
+      operationId: runtime.daemon_heartbeat
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/runtime.daemonHeartbeatReq'
+        description: Daemon-level heartbeat
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Data-envelope_EmptyResp'
+          description: heartbeat accepted
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: VALIDATION_ERROR
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: AUTH_REQUIRED
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: FORBIDDEN
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: INTERNAL_ERROR
+      security:
+      - Bearer: []
+      summary: Daemon-level heartbeat
+      tags:
+      - runtime
   /providers:
     get:
       description: Returns the active runtime-provider catalog (claude / openclaw
