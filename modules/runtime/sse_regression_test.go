@@ -370,3 +370,48 @@ func TestSSERegression_SSEWritesHaveDeadline(t *testing.T) {
 		t.Errorf("sseEvents 必须 ≥ 5 处 SetWriteDeadline (initial / replay / live / keepalive write+flush / close write+flush), got %d (P1 yujiawei R4 fix)", setCount)
 	}
 }
+
+// Phase B metrics (#36): 三个 counter/gauge 必须存在且在正确路径上更新.
+// source-grep 锁不变量: future refactor 删 metrics 或放错路径时立刻 fail.
+//
+// 指标语义 (v6 plan §4 E7 Phase B go/no-go gate):
+//   - sse_active_conns:           gauge,   register +1 / handler exit -1
+//   - sse_reconnect_total:        counter, register +1
+//   - heartbeat_fallback_hit_total: counter, heartbeat claim pending +1
+
+func TestSSERegression_MetricsVarDeclarations(t *testing.T) {
+	src := mustReadSource(t, "metrics.go")
+	for _, name := range []string{"sse_active_conns", "sse_reconnect_total", "heartbeat_fallback_hit_total"} {
+		if !strings.Contains(src, name) {
+			t.Errorf("metrics.go 必须声明 expvar %q (Phase B go/no-go gate, #36)", name)
+		}
+	}
+}
+
+func TestSSERegression_RegisterIncrementsMetrics(t *testing.T) {
+	body := extractFuncBody(t, mustReadSource(t, "sse.go"), "register")
+	if !strings.Contains(body, "sseReconnectTotal.Add(1)") {
+		t.Error("sseHub.register 必须 sseReconnectTotal.Add(1) — 每次新 SSE 连接 +1 (#36)")
+	}
+	if !strings.Contains(body, "sseActiveConns.Add(1)") {
+		t.Error("sseHub.register 必须 sseActiveConns.Add(1) — 新连接进入 active gauge (#36)")
+	}
+}
+
+func TestSSERegression_SSEEventsDecrementsActiveGauge(t *testing.T) {
+	body := extractFuncBody(t, mustReadSource(t, "sse.go"), "sseEvents")
+	// defer sseActiveConns.Add(-1) 必须在 handler 内, 跟 defer cleanup() 配对.
+	// 不设的话 active gauge 永远涨, Phase B 数据基线全废.
+	if !strings.Contains(body, "sseActiveConns.Add(-1)") {
+		t.Error("sseEvents 必须 defer sseActiveConns.Add(-1) — handler 退出时 -1 保持 gauge 正确 (#36)")
+	}
+}
+
+func TestSSERegression_HeartbeatClaimsIncrementFallbackCounter(t *testing.T) {
+	body := extractFuncBody(t, mustReadSource(t, "api.go"), "heartbeat")
+	// 两个 claim 路径各 +1 (upgrade + bot provision). heartbeat 是 SSE 的 fallback,
+	// 每次 claim 说明 SSE 没提前送到, 计一次 fallback hit.
+	if !strings.Contains(body, "heartbeatFallbackHitTotal.Add(1)") {
+		t.Error("heartbeat 必须在 claimPending 路径 increment heartbeatFallbackHitTotal (#36: Phase B 需该数据判断 SSE 是否够稳)")
+	}
+}

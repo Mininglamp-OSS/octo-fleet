@@ -480,6 +480,7 @@ func (rt *Runtime) heartbeat(c *wkhttp.Context) {
 	// Atomically claim a pending upgrade task
 	claimedUpgrade, _ := rt.db.claimPendingUpgrade(spaceID, existing.DaemonID, ownerUID)
 	if claimedUpgrade != nil {
+		heartbeatFallbackHitTotal.Add(1)
 		resp.PendingUpgrade = &pendingUpgradeCmd{
 			TaskID:        claimedUpgrade.ID,
 			Component:     claimedUpgrade.Component,
@@ -495,6 +496,7 @@ func (rt *Runtime) heartbeat(c *wkhttp.Context) {
 	// + bot.add cycle.
 	claimedBot, _ := rt.db.claimPendingBotProvision(existing.DaemonID, existing.SpaceID, ownerUID, existing.Provider)
 	if claimedBot != nil {
+		heartbeatFallbackHitTotal.Add(1)
 		resp.PendingCommand = rt.buildPendingBotProvision(claimedBot)
 	}
 
