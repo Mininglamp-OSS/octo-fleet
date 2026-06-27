@@ -380,3 +380,75 @@ func (d *runtimeDB) loadProviders() ([]providerDef, error) {
 	).Load(&rows)
 	return rows, err
 }
+
+// upsertDaemon inserts or updates a daemon row keyed by (device_id, space_id, owner_uid).
+// The unique key uk_device_space_owner ensures one daemon per device per owner per space.
+// On duplicate (device重装后daemon_id变化), the old row is updated with the new daemon_id.
+func (d *runtimeDB) upsertDaemon(deviceID int64, daemonID, spaceID, ownerUID string, intervalMs int64) (int64, error) {
+	result, err := d.session.InsertBySql(`
+		INSERT INTO daemon (daemon_id, device_id, space_id, owner_uid, status, heartbeat_interval_ms, last_seen_at)
+		VALUES (?, ?, ?, ?, 'online', IF(? > 0, ?, 0), NOW())
+		ON DUPLICATE KEY UPDATE
+			daemon_id=VALUES(daemon_id),
+			status='online',
+			last_seen_at=NOW(),
+			heartbeat_interval_ms=IF(VALUES(heartbeat_interval_ms) > 0, VALUES(heartbeat_interval_ms), heartbeat_interval_ms)`,
+		daemonID, deviceID, spaceID, ownerUID, intervalMs, intervalMs,
+	).Exec()
+	if err != nil {
+		return 0, err
+	}
+
+	id, err := result.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	if id == 0 {
+		_, err = d.session.SelectBySql(
+			"SELECT id FROM daemon WHERE device_id=? AND space_id=? AND owner_uid=?",
+			deviceID, spaceID, ownerUID,
+		).Load(&id)
+		if err != nil {
+			return 0, err
+		}
+	}
+	return id, nil
+}
+
+// touchDaemon续命: update status + last_seen_at for an existing daemon.
+// WHERE clause uses the trusted triple (daemon_id, space_id, owner_uid) to prevent cross-tenant access.
+// deviceUUID parameter is reserved for endpoint-level validation (fleet-4); not used in SQL here.
+func (d *runtimeDB) touchDaemon(daemonID, spaceID, ownerUID, deviceUUID string, intervalMs int64) (int64, error) {
+	_ = deviceUUID // endpoint layer validates device_uuid consistency; db layer scopes by daemon_id+space_id+owner_uid
+	result, err := d.session.UpdateBySql(
+		`UPDATE daemon SET status='online', last_seen_at=NOW(), heartbeat_interval_ms=IF(? > 0, ?, heartbeat_interval_ms) WHERE daemon_id=? AND space_id=? AND owner_uid=?`,
+		intervalMs, intervalMs, daemonID, spaceID, ownerUID,
+	).Exec()
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+// markStaleDaemonsOffline marks online daemons as offline when their last_seen_at
+// exceeds 3x their heartbeat interval (or 3x defaultIntervalMs when unset).
+func (d *runtimeDB) markStaleDaemonsOffline(defaultIntervalMs int64) (int64, error) {
+	result, err := d.session.UpdateBySql(
+		`UPDATE daemon SET status='offline' WHERE status='online' AND last_seen_at < DATE_SUB(NOW(), INTERVAL (IF(heartbeat_interval_ms>0, heartbeat_interval_ms, ?) * 3 / 1000) SECOND)`,
+		defaultIntervalMs,
+	).Exec()
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+// listDaemonsBySpaceOwner returns all daemons for a given (space_id, owner_uid),
+// ordered by status DESC (online first) then daemon_id ASC.
+func (d *runtimeDB) listDaemonsBySpaceOwner(spaceID, ownerUID string) ([]*daemonModel, error) {
+	var list []*daemonModel
+	_, err := d.session.Select("*").From("daemon").
+		Where("space_id=? AND owner_uid=?", spaceID, ownerUID).
+		OrderDir("status", false).OrderAsc("daemon_id").Load(&list)
+	return list, err
+}

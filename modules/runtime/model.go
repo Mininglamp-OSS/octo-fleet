@@ -22,6 +22,17 @@ type agentRuntimeModel struct {
 	db.BaseModel
 }
 
+type daemonModel struct {
+	DaemonID            string
+	DeviceID            int64
+	SpaceID             string
+	OwnerUID            string
+	Status              string
+	HeartbeatIntervalMs int64
+	LastSeenAt          db.Time
+	db.BaseModel
+}
+
 type registerReq struct {
 	DaemonID            string               `json:"daemon_id"`
 	DeviceName          string               `json:"device_name"`
