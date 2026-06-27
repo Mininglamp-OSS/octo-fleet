@@ -933,6 +933,15 @@ func (rt *Runtime) runSweeper() {
 
 	for range ticker.C {
 		if !time.Now().Before(graceUntil) {
+			// Daemon 绿点判死:daemon 停掉后 last_seen_at 超 3× 心跳间隔 → offline。
+			// 与 runtime sweep 同 grace 守卫、同默认间隔;放 runtime sweep 前确保不被其 err continue 跳过。
+			dn, derr := rt.db.markStaleDaemonsOffline(defaultHeartbeatIntervalMs)
+			if derr != nil {
+				rt.Error("sweep stale daemons", zap.Error(derr))
+			} else if dn > 0 {
+				rt.Info("marked stale daemons offline", zap.Int64("count", dn))
+			}
+
 			n, err := rt.db.markStaleOffline(defaultHeartbeatIntervalMs)
 			if err != nil {
 				rt.Error("sweep stale runtimes", zap.Error(err))
