@@ -656,6 +656,8 @@ func (rt *Runtime) daemonDeregister(c *wkhttp.Context) {
 
 	ResponseEmpty(c)
 }
+
+// list godoc
 // @Summary      List runtimes in a space
 // @Description  Aggregate view for the runtime management UI: the caller's runtimes plus per-runtime update hints, per-device daemon update hints, in-progress upgrades, and a device map (keyed by device.id). The device map and green-dot status now come from the daemon table (daemon process liveness), so empty devices (daemon-only, no runtime) are also listed. Single object (not paginated); the set is small (one user's devices).
 // @Tags         runtime

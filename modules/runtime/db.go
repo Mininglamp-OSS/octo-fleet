@@ -488,6 +488,7 @@ func (d *runtimeDB) markDaemonOffline(daemonID, spaceID, ownerUID string) (int64
 	}
 	return result.RowsAffected()
 }
+
 // one registered for the given (daemon_id, space_id, owner_uid) triple.
 // Returns true when mismatch detected (caller should warn but NOT fail the heartbeat).
 // SQL scoped by daemon_id+space_id+owner_uid to prevent cross-tenant access.
