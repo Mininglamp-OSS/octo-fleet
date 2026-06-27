@@ -110,6 +110,8 @@ func newSseHub() *sseHub {
 func (h *sseHub) register(runtimeID int64) (chan eventEnvelope, func()) {
 	ch := make(chan eventEnvelope, sseChannelBuffer)
 	h.channels.Store(runtimeID, ch)
+	sseReconnectTotal.Add(1)
+	sseActiveConns.Add(1)
 	return ch, func() {
 		if v, ok := h.channels.Load(runtimeID); ok {
 			if existing, _ := v.(chan eventEnvelope); existing == ch {
@@ -250,6 +252,7 @@ func (rt *Runtime) sseEvents(c *wkhttp.Context) {
 	// (codex R6 N6). Phase A 双跑期 heartbeat 兜底覆盖, Phase B 必须修.
 	ch, cleanup := rt.sseHub.register(runtimeID)
 	defer cleanup()
+	defer sseActiveConns.Add(-1)
 
 	// 6. replay missed events 从 event_log.
 	missed, qerr := rt.eventDB.querySince(runtimeID, spaceID, ownerUID, lastEventID, sseReplayLimit)
