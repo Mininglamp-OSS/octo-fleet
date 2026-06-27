@@ -8,7 +8,7 @@ require (
 	github.com/gocraft/dbr/v2 v2.7.5
 	github.com/judwhite/go-svc v1.2.1
 	github.com/spf13/viper v1.16.0
-	github.com/stretchr/testify v1.8.3
+	github.com/stretchr/testify v1.11.1
 	go.uber.org/zap v1.24.0
 )
 
