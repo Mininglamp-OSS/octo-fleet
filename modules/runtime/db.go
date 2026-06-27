@@ -22,17 +22,16 @@ func newRuntimeDB(ctx *config.Context) *runtimeDB {
 
 func (d *runtimeDB) upsert(m *agentRuntimeModel) (int64, error) {
 	result, err := d.session.InsertBySql(`
-		INSERT INTO agent_runtime (space_id, daemon_id, device_id, name, provider, runtime_mode, status, version, device_name, device_info, metadata, owner_uid, heartbeat_interval_ms, last_seen_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+		INSERT INTO agent_runtime (space_id, daemon_id, device_id, name, provider, runtime_mode, status, version, metadata, owner_uid, heartbeat_interval_ms, last_seen_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
 		ON DUPLICATE KEY UPDATE
 			device_id=IF(VALUES(device_id)>0, VALUES(device_id), device_id),
 			name=VALUES(name), status=VALUES(status), version=VALUES(version),
-			device_name=VALUES(device_name), device_info=VALUES(device_info),
 			metadata=VALUES(metadata),
 			heartbeat_interval_ms=IF(VALUES(heartbeat_interval_ms)>0, VALUES(heartbeat_interval_ms), heartbeat_interval_ms),
 			last_seen_at=NOW()`,
 		m.SpaceID, m.DaemonID, m.DeviceID, m.Name, m.Provider, m.RuntimeMode,
-		m.Status, m.Version, m.DeviceName, m.DeviceInfo, m.Metadata, m.OwnerUID, m.HeartbeatIntervalMs,
+		m.Status, m.Version, m.Metadata, m.OwnerUID, m.HeartbeatIntervalMs,
 	).Exec()
 	if err != nil {
 		return 0, err

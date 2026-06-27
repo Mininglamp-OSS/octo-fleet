@@ -138,23 +138,7 @@ func (rt *Runtime) register(c *wkhttp.Context) {
 		return
 	}
 
-	// Server-side clamp on daemon-reported heartbeat interval. 0 means
-	// "use sweeper default" (see runSweeper). Below 1s would race the
-	// sweeper; above 5min undermines stale detection entirely. Out-of-
-	// range values fall back to 0 (=default) rather than erroring the
-	// register — a misbehaving daemon should still register.
-	const minHeartbeatIntervalMs = 1000
-	const maxHeartbeatIntervalMs = 300000
-	if req.HeartbeatIntervalMs != 0 &&
-		(req.HeartbeatIntervalMs < minHeartbeatIntervalMs || req.HeartbeatIntervalMs > maxHeartbeatIntervalMs) {
-		rt.Warn("daemon-reported heartbeat_interval_ms out of range, falling back to default",
-			zap.String("daemon_id", req.DaemonID),
-			zap.Int64("reported_ms", req.HeartbeatIntervalMs),
-			zap.Int64("min_ms", minHeartbeatIntervalMs),
-			zap.Int64("max_ms", maxHeartbeatIntervalMs),
-		)
-		req.HeartbeatIntervalMs = 0
-	}
+	req.HeartbeatIntervalMs = clampHeartbeatIntervalMs(req.HeartbeatIntervalMs)
 
 	ownerUID := c.MustGet("uid").(string)
 	spaceID := c.MustGet("space_id").(string)
@@ -210,6 +194,15 @@ func (rt *Runtime) register(c *wkhttp.Context) {
 		}
 	}
 
+	// daemon 接入层:无条件 upsert daemon 行(即使 runtimes 为空 / 无 CLI),
+	// 这是"空设备可见 + 绿点"的权威源。daemon_id 来自上报,space/owner 来自鉴权。
+	daemonHbMs := clampHeartbeatIntervalMs(req.HeartbeatIntervalMs)
+	if deviceID > 0 {
+		if _, e := rt.db.upsertDaemon(deviceID, req.DaemonID, spaceID, ownerUID, daemonHbMs); e != nil {
+			rt.Warn("upsert daemon failed, continuing", zap.String("daemon_id", req.DaemonID), zap.Error(e))
+		}
+	}
+
 	var registered []registeredRuntimeResp
 
 	for _, r := range req.Runtimes {
@@ -246,8 +239,6 @@ func (rt *Runtime) register(c *wkhttp.Context) {
 			RuntimeMode:         "local",
 			Status:              status,
 			Version:             r.Version,
-			DeviceName:          req.DeviceName,
-			DeviceInfo:          req.DeviceInfo,
 			Metadata:            string(metaBytes),
 			OwnerUID:            ownerUID,
 			HeartbeatIntervalMs: req.HeartbeatIntervalMs,
@@ -925,8 +916,6 @@ func toRuntimeResp(m *agentRuntimeModel) runtimeResp {
 		RuntimeMode: m.RuntimeMode,
 		Status:      m.Status,
 		Version:     m.Version,
-		DeviceName:  m.DeviceName,
-		DeviceInfo:  m.DeviceInfo,
 		Metadata:    m.Metadata,
 		OwnerUID:    m.OwnerUID,
 		LastSeenAt:  formatTime(time.Time(m.LastSeenAt)),

@@ -13,8 +13,6 @@ type agentRuntimeModel struct {
 	RuntimeMode         string
 	Status              string
 	Version             string
-	DeviceName          string
-	DeviceInfo          string
 	Metadata            string
 	OwnerUID            string
 	HeartbeatIntervalMs int64 // 0 = unset, sweeper falls back to default
@@ -94,8 +92,6 @@ type runtimeResp struct {
 	RuntimeMode string `json:"runtime_mode"`
 	Status      string `json:"status"`
 	Version     string `json:"version"`
-	DeviceName  string `json:"device_name"`
-	DeviceInfo  string `json:"device_info"`
 	Metadata    string `json:"metadata"`
 	OwnerUID    string `json:"owner_uid"`
 	LastSeenAt  string `json:"last_seen_at" swaggertype:"string,date-time"`
