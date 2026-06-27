@@ -427,7 +427,22 @@ func (d *runtimeDB) touchDaemon(daemonID, spaceID, ownerUID, deviceUUID string, 
 	return result.RowsAffected()
 }
 
-// daemonDeviceUUIDMismatch checks if the reported device_uuid differs from the
+// markDaemonOffline flips a daemon row to offline on graceful shutdown, so the
+// device green dot clears immediately instead of waiting for the sweeper's
+// stale-detection window. Scoped by daemon_id+space_id+owner_uid (daemon_id from
+// the request body, space/owner from auth) so a caller can't down another
+// tenant's daemon. Returns RowsAffected; 0 means no matching row (already gone /
+// never registered) — the caller treats that as a no-op success.
+func (d *runtimeDB) markDaemonOffline(daemonID, spaceID, ownerUID string) (int64, error) {
+	result, err := d.session.UpdateBySql(
+		`UPDATE daemon SET status='offline' WHERE daemon_id=? AND space_id=? AND owner_uid=?`,
+		daemonID, spaceID, ownerUID,
+	).Exec()
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
 // one registered for the given (daemon_id, space_id, owner_uid) triple.
 // Returns true when mismatch detected (caller should warn but NOT fail the heartbeat).
 // SQL scoped by daemon_id+space_id+owner_uid to prevent cross-tenant access.

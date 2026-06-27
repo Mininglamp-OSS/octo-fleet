@@ -131,6 +131,12 @@ type daemonHeartbeatReq struct {
 	HeartbeatIntervalMs int64  `json:"heartbeat_interval_ms,omitempty"`
 }
 
+// daemonDeregisterReq is the POST /v1/daemons/_deregister body — graceful
+// shutdown signal that marks the daemon offline so the green dot clears at once.
+type daemonDeregisterReq struct {
+	DaemonID string `json:"daemon_id"`
+}
+
 type activeUpgradeItem struct {
 	TaskID      string `json:"task_id"`
 	DaemonID    string `json:"daemon_id"`

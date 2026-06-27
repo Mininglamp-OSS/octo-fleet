@@ -78,6 +78,7 @@ func (rt *Runtime) Route(r *wkhttp.WKHttp) {
 		daemon.GET("/providers", rt.listProviders)                            // active runtime-provider catalog
 		daemon.POST("/upgrades/:task_id/report", rt.upgradeReport)            // report upgrade progress
 		daemon.POST("/daemons/heartbeat", rt.daemonHeartbeat)                 // daemon-level liveness → device green dot
+		daemon.POST("/daemons/_deregister", rt.daemonDeregister)              // graceful shutdown → clear green dot immediately
 	}
 
 	web := r.Group("/v1", auth.Middleware("web"))
@@ -612,7 +613,49 @@ func (rt *Runtime) daemonHeartbeat(c *wkhttp.Context) {
 	ResponseEmpty(c)
 }
 
-// list godoc
+// daemonDeregister godoc
+// @Summary      Deregister a daemon
+// @Description  Mark this daemon offline on graceful shutdown so the device green dot clears immediately instead of waiting for the sweeper's stale window. Idempotent; a daemon_id matching no row is a no-op success.
+// @Tags         runtime
+// @ID           runtime.daemon_deregister
+// @Accept       json
+// @Produce      json
+// @Security     Bearer
+// @Param        body body daemonDeregisterReq true "Daemon to mark offline"
+// @Success      200 {object} envelope.Data[envelope.EmptyResp] "deregistered"
+// @Failure      400 {object} envelope.Error "VALIDATION_ERROR"
+// @Failure      401 {object} envelope.Error "AUTH_REQUIRED"
+// @Failure      403 {object} envelope.Error "FORBIDDEN"
+// @Failure      500 {object} envelope.Error "INTERNAL_ERROR"
+// @Router       /daemons/_deregister [post]
+func (rt *Runtime) daemonDeregister(c *wkhttp.Context) {
+	var req daemonDeregisterReq
+	if err := c.BindJSON(&req); err != nil {
+		responseError(c, errcode.Validation)
+		return
+	}
+	if req.DaemonID == "" {
+		responseError(c, errcode.Validation)
+		return
+	}
+	ownerUID := c.MustGet("uid").(string)
+	spaceID := c.MustGet("space_id").(string)
+
+	// Scoped by (daemon_id from body, space/owner from auth) — can't down another
+	// tenant's daemon. rows==0 (already gone / never registered) is a no-op success.
+	rows, err := rt.db.markDaemonOffline(req.DaemonID, spaceID, ownerUID)
+	if err != nil {
+		rt.Error("mark daemon offline", zap.Error(err), zap.String("daemon_id", req.DaemonID))
+		responseError(c, errcode.InternalError)
+		return
+	}
+	if rows == 0 {
+		rt.Warn("daemon deregister matched no row",
+			zap.String("daemon_id", req.DaemonID), zap.String("owner", ownerUID))
+	}
+
+	ResponseEmpty(c)
+}
 // @Summary      List runtimes in a space
 // @Description  Aggregate view for the runtime management UI: the caller's runtimes plus per-runtime update hints, per-device daemon update hints, in-progress upgrades, and a device map (keyed by device.id). The device map and green-dot status now come from the daemon table (daemon process liveness), so empty devices (daemon-only, no runtime) are also listed. Single object (not paginated); the set is small (one user's devices).
 // @Tags         runtime

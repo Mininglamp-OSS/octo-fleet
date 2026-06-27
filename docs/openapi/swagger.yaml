@@ -224,6 +224,11 @@ components:
           description: daemon-reported, 0 = unset
           type: integer
       type: object
+    runtime.daemonDeregisterReq:
+      properties:
+        daemon_id:
+          type: string
+      type: object
     runtime.deregisterReq:
       properties:
         runtime_ids:
@@ -1017,6 +1022,56 @@ paths:
       summary: Fetch bot provision payload
       tags:
       - bot
+  /daemons/_deregister:
+    post:
+      description: Mark this daemon offline on graceful shutdown so the device green
+        dot clears immediately instead of waiting for the sweeper's stale window.
+        Scoped by (daemon_id from body, space_id + owner_uid from auth). Idempotent;
+        a daemon_id matching no row is a no-op success.
+      operationId: runtime.daemon_deregister
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/runtime.daemonDeregisterReq'
+        description: Daemon to mark offline
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Data-envelope_EmptyResp'
+          description: deregistered
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: VALIDATION_ERROR
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: AUTH_REQUIRED
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: FORBIDDEN
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/envelope.Error'
+          description: INTERNAL_ERROR
+      security:
+      - Bearer: []
+      summary: Daemon-level deregister
+      tags:
+      - runtime
   /daemons/heartbeat:
     post:
       description: Daemon-level liveness tick maintaining the device online indicator

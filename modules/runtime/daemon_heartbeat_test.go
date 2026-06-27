@@ -58,3 +58,48 @@ func TestDaemonDeviceUUIDMismatchScoped(t *testing.T) {
 		}
 	}
 }
+
+// TestDaemonDeregisterRouteRegistered: assert Route registers /daemons/_deregister in daemon group.
+func TestDaemonDeregisterRouteRegistered(t *testing.T) {
+	src := mustReadSource(t, "api.go")
+	body := extractFuncBody(t, src, "Route")
+	if !strings.Contains(body, `"/daemons/_deregister"`) {
+		t.Error("Route must register /daemons/_deregister")
+	}
+	if !strings.Contains(body, "rt.daemonDeregister") {
+		t.Error("Route must wire rt.daemonDeregister for /daemons/_deregister")
+	}
+}
+
+// TestDaemonDeregisterScoped: handler takes uid/space_id from auth, calls
+// markDaemonOffline, rows==0 warns but still ResponseEmpty (idempotent no-op).
+func TestDaemonDeregisterScoped(t *testing.T) {
+	src := mustReadSource(t, "api.go")
+	body := extractFuncBody(t, src, "daemonDeregister")
+	for _, keyword := range []string{`MustGet("uid")`, `MustGet("space_id")`} {
+		if !strings.Contains(body, keyword) {
+			t.Errorf("daemonDeregister must take %s from auth context", keyword)
+		}
+	}
+	if !strings.Contains(body, "markDaemonOffline") {
+		t.Error("daemonDeregister must call markDaemonOffline")
+	}
+	if !strings.Contains(body, "rows == 0") {
+		t.Error("daemonDeregister must check rows == 0 (idempotent no-op)")
+	}
+	if !strings.Contains(body, "ResponseEmpty(c)") {
+		t.Error("daemonDeregister must call ResponseEmpty")
+	}
+}
+
+// TestMarkDaemonOfflineScoped: SQL scoped by daemon_id+space_id+owner_uid to
+// prevent downing another tenant's daemon.
+func TestMarkDaemonOfflineScoped(t *testing.T) {
+	src := mustReadSource(t, "db.go")
+	body := extractFuncBody(t, src, "markDaemonOffline")
+	for _, keyword := range []string{"daemon_id", "space_id", "owner_uid", "offline"} {
+		if !strings.Contains(body, keyword) {
+			t.Errorf("markDaemonOffline SQL must contain %q", keyword)
+		}
+	}
+}
