@@ -60,10 +60,10 @@ func (d *runtimeDB) upsert(m *agentRuntimeModel) (int64, error) {
 // pure-UPDATE hits.
 func (d *runtimeDB) upsertDevice(deviceUUID, hostname, os, arch, osVersion string) (int64, error) {
 	result, err := d.session.InsertBySql(
-		`INSERT INTO device (device_uuid, hostname, os, arch, os_version, status, last_seen_at)
-		 VALUES (?, ?, ?, ?, ?, 'online', NOW())
+		`INSERT INTO device (device_uuid, hostname, os, arch, os_version)
+		 VALUES (?, ?, ?, ?, ?)
 		 ON DUPLICATE KEY UPDATE hostname=VALUES(hostname), os=VALUES(os), arch=VALUES(arch),
-		   os_version=VALUES(os_version), status='online', last_seen_at=NOW()`,
+		   os_version=VALUES(os_version)`,
 		deviceUUID, hostname, os, arch, osVersion,
 	).Exec()
 	if err != nil {

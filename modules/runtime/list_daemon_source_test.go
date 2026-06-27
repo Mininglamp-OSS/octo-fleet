@@ -60,6 +60,35 @@ func TestQueryDevicesNoStatusColumn(t *testing.T) {
 	}
 }
 
+// TestUpsertDeviceNoStatusColumn ensures upsertDevice no longer writes the removed
+// device.status and device.last_seen_at columns (runtime SQL error guard, fleet-6).
+func TestUpsertDeviceNoStatusColumn(t *testing.T) {
+	src, err := os.ReadFile("db.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(src)
+
+	// Find the upsertDevice function body
+	idx := strings.Index(content, "func (d *runtimeDB) upsertDevice")
+	if idx == -1 {
+		t.Fatal("upsertDevice not found in db.go")
+	}
+	funcBody := content[idx:]
+	endIdx := strings.Index(funcBody, "\n}\n")
+	if endIdx == -1 {
+		t.Fatal("cannot find end of upsertDevice")
+	}
+	funcBody = funcBody[:endIdx]
+
+	if strings.Contains(funcBody, "`status`") || strings.Contains(funcBody, "'status'") {
+		t.Error("upsertDevice must NOT reference device.status column (column removed in fleet-1)")
+	}
+	if strings.Contains(funcBody, "last_seen_at") {
+		t.Error("upsertDevice must NOT reference device.last_seen_at column (column removed in fleet-1)")
+	}
+}
+
 // TestBuildDeviceViewsEmptyDeviceVisible verifies that devices with a daemon
 // but no runtime row are still visible (empty-device-visible invariant).
 func TestBuildDeviceViewsEmptyDeviceVisible(t *testing.T) {
