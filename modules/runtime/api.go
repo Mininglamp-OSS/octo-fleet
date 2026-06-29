@@ -196,13 +196,14 @@ func (rt *Runtime) register(c *wkhttp.Context) {
 		}
 	}
 
-	// daemon 接入层:无条件 upsert daemon 行(即使 runtimes 为空 / 无 CLI),
-	// 这是"空设备可见 + 绿点"的权威源。daemon_id 来自上报,space/owner 来自鉴权。
+	// daemon 接入层:无条件 upsert daemon 行(即使 runtimes 为空 / 无 CLI / 无
+	// device 行),这是"空设备可见 + 绿点"的权威源。daemon_id 来自上报,
+	// space/owner 来自鉴权;device_id 缺失时存 0,后续 register 解析出 device
+	// 再补链。device telemetry 是 additive,其失败(deviceID==0)不得 brick
+	// daemon 可见性 —— 故此处不再以 deviceID>0 为前置门槛(octo-fleet#69)。
 	daemonHbMs := clampHeartbeatIntervalMs(req.HeartbeatIntervalMs)
-	if deviceID > 0 {
-		if _, e := rt.db.upsertDaemon(deviceID, req.DaemonID, spaceID, ownerUID, daemonHbMs); e != nil {
-			rt.Warn("upsert daemon failed, continuing", zap.String("daemon_id", req.DaemonID), zap.Error(e))
-		}
+	if _, e := rt.db.upsertDaemon(deviceID, req.DaemonID, spaceID, ownerUID, daemonHbMs); e != nil {
+		rt.Warn("upsert daemon failed, continuing", zap.String("daemon_id", req.DaemonID), zap.Error(e))
 	}
 
 	var registered []registeredRuntimeResp
@@ -848,16 +849,27 @@ func deviceIDsFromDaemons(daemons []*daemonModel) []int64 {
 
 // buildDeviceViews merges daemon rows (接入层: green-dot status + last_seen + daemon_id)
 // with device machine info + component inventory, producing the outward-facing
-// deviceView map keyed by device.id. Daemon drives → empty devices (daemon-only,
-// no runtime) also appear. device↔daemon is 1:1 under a single (space,owner),
-// so injecting by dm.DeviceID does not conflict.
+// deviceView map. A daemon-only machine whose device link has resolved is keyed
+// by its device.id (>0); device↔daemon is 1:1 under a single (space,owner), so
+// injecting by dm.DeviceID does not conflict. A daemon whose device_id is still
+// 0 (device_info missing or its additive upsert failed) is NOT dropped — it is
+// rendered with daemon_id as its fallback identity and keyed by -daemon.id, a
+// per-daemon-unique synthetic key that can never collide with a real device.id
+// (>0) nor with another daemon-only row. This keeps the invariant: daemon
+// online ⟹ device visible, even with device_id==0 and zero agent_runtime rows
+// (octo-fleet#69).
 func buildDeviceViews(daemons []*daemonModel, deviceRows map[int64]deviceView) map[int64]deviceView {
 	out := make(map[int64]deviceView, len(daemons))
 	for _, dm := range daemons {
-		if dm.DeviceID <= 0 {
-			continue
-		}
+		key := dm.DeviceID
 		dv, ok := deviceRows[dm.DeviceID]
+		if dm.DeviceID <= 0 {
+			// daemon-only row with no resolved device link: synthesize a
+			// minimal view identified by daemon_id, keyed off the daemon PK so
+			// multiple such rows under one owner stay distinct.
+			ok = false
+			key = -dm.Id
+		}
 		if !ok {
 			// device row missing (should not happen if register created both) —
 			// provide a minimal view using daemon-known fields.
@@ -867,7 +879,7 @@ func buildDeviceViews(daemons []*daemonModel, deviceRows map[int64]deviceView) m
 		dv.Status = dm.Status
 		dv.LastSeenAt = formatTime(time.Time(dm.LastSeenAt))
 		dv.DaemonID = dm.DaemonID
-		out[dm.DeviceID] = dv
+		out[key] = dv
 	}
 	return out
 }
