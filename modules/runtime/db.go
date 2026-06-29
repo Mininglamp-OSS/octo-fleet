@@ -23,14 +23,14 @@ func newRuntimeDB(ctx *config.Context) *runtimeDB {
 func (d *runtimeDB) upsert(m *agentRuntimeModel) (int64, error) {
 	result, err := d.session.InsertBySql(`
 		INSERT INTO agent_runtime (space_id, daemon_id, device_id, name, provider, runtime_mode, status, version, device_name, device_info, metadata, owner_uid, heartbeat_interval_ms, last_seen_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP())
 		ON DUPLICATE KEY UPDATE
 			device_id=IF(VALUES(device_id)>0, VALUES(device_id), device_id),
 			name=VALUES(name), status=VALUES(status), version=VALUES(version),
 			device_name=VALUES(device_name), device_info=VALUES(device_info),
 			metadata=VALUES(metadata),
 			heartbeat_interval_ms=IF(VALUES(heartbeat_interval_ms)>0, VALUES(heartbeat_interval_ms), heartbeat_interval_ms),
-			last_seen_at=NOW()`,
+			last_seen_at=UTC_TIMESTAMP()`,
 		m.SpaceID, m.DaemonID, m.DeviceID, m.Name, m.Provider, m.RuntimeMode,
 		m.Status, m.Version, m.DeviceName, m.DeviceInfo, m.Metadata, m.OwnerUID, m.HeartbeatIntervalMs,
 	).Exec()
@@ -62,9 +62,9 @@ func (d *runtimeDB) upsert(m *agentRuntimeModel) (int64, error) {
 func (d *runtimeDB) upsertDevice(deviceUUID, hostname, os, arch, osVersion string) (int64, error) {
 	result, err := d.session.InsertBySql(
 		`INSERT INTO device (device_uuid, hostname, os, arch, os_version, status, last_seen_at)
-		 VALUES (?, ?, ?, ?, ?, 'online', NOW())
+		 VALUES (?, ?, ?, ?, ?, 'online', UTC_TIMESTAMP())
 		 ON DUPLICATE KEY UPDATE hostname=VALUES(hostname), os=VALUES(os), arch=VALUES(arch),
-		   os_version=VALUES(os_version), status='online', last_seen_at=NOW()`,
+		   os_version=VALUES(os_version), status='online', last_seen_at=UTC_TIMESTAMP()`,
 		deviceUUID, hostname, os, arch, osVersion,
 	).Exec()
 	if err != nil {
@@ -90,9 +90,9 @@ func (d *runtimeDB) upsertDevice(deviceUUID, hostname, os, arch, osVersion strin
 func (d *runtimeDB) upsertDeviceComponent(deviceID int64, ctype, name, componentKey, reportedVersion string) error {
 	_, err := d.session.InsertBySql(
 		`INSERT INTO device_component (device_id, component_type, name, component_key, reported_version, reported_at)
-		 VALUES (?, ?, ?, ?, ?, NOW())
+		 VALUES (?, ?, ?, ?, ?, UTC_TIMESTAMP())
 		 ON DUPLICATE KEY UPDATE component_key=VALUES(component_key),
-		   reported_version=VALUES(reported_version), reported_at=NOW()`,
+		   reported_version=VALUES(reported_version), reported_at=UTC_TIMESTAMP()`,
 		deviceID, ctype, name, componentKey, reportedVersion,
 	).Exec()
 	return err
@@ -156,7 +156,7 @@ func (d *runtimeDB) firstRuntimeIDForDaemon(spaceID, daemonID, ownerUID string) 
 func (d *runtimeDB) updateHeartbeat(id int64) error {
 	_, err := d.session.Update("agent_runtime").
 		Set("status", "online").
-		Set("last_seen_at", dbr.Expr("NOW()")).
+		Set("last_seen_at", dbr.Expr("UTC_TIMESTAMP()")).
 		Where("id=?", id).
 		Exec()
 	return err
@@ -182,7 +182,7 @@ func (d *runtimeDB) markStaleOffline(defaultIntervalMs int64) (int64, error) {
 		`UPDATE agent_runtime
 		    SET status='offline'
 		  WHERE status='online'
-		    AND last_seen_at < DATE_SUB(NOW(), INTERVAL (IF(heartbeat_interval_ms>0, heartbeat_interval_ms, ?) * 3 / 1000) SECOND)`,
+		    AND last_seen_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL (IF(heartbeat_interval_ms>0, heartbeat_interval_ms, ?) * 3 / 1000) SECOND)`,
 		defaultIntervalMs,
 	).Exec()
 	if err != nil {
