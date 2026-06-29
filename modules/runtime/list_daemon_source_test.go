@@ -95,8 +95,9 @@ func TestBuildDeviceViewsEmptyDeviceVisible(t *testing.T) {
 	daemons := []*daemonModel{
 		{DeviceID: 5, DaemonID: "d5", Status: "online", LastSeenAt: mustParseTime("2026-06-27T10:00:00Z")},
 		{DeviceID: 7, DaemonID: "d7", Status: "offline", LastSeenAt: mustParseTime("2026-06-27T09:00:00Z")},
-		{DeviceID: 0, DaemonID: "d0", Status: "online", LastSeenAt: mustParseTime("2026-06-27T10:00:00Z")}, // should be skipped
+		{DeviceID: 0, DaemonID: "d0", Status: "online", LastSeenAt: mustParseTime("2026-06-27T10:00:00Z")}, // daemon-only, device link unresolved
 	}
+	daemons[2].Id = 3 // daemon PK drives the synthetic key for device_id==0 rows
 
 	deviceRows := map[int64]deviceView{
 		5: {DeviceID: 5, Name: "host5", Components: []deviceComponentView{{Name: "octo-daemon", Version: "0.0.3"}}},
@@ -127,8 +128,17 @@ func TestBuildDeviceViewsEmptyDeviceVisible(t *testing.T) {
 		t.Errorf("device 7 daemon_id: want d7, got %q", result[7].DaemonID)
 	}
 
-	// Device 0 (DeviceID <= 0) should be skipped
-	if _, ok := result[0]; ok {
-		t.Error("device 0 (invalid DeviceID) should be skipped")
+	// Device 0 (daemon-only, device link unresolved) must still be visible —
+	// keyed by -daemon.id so it neither collapses nor collides with a real
+	// device.id, carrying daemon_id as its fallback identity (octo-fleet#69).
+	dv0, ok := result[-3]
+	if !ok {
+		t.Fatal("daemon-only row (device_id==0) missing from result — violates daemon-online ⟹ device-visible invariant")
+	}
+	if dv0.DaemonID != "d0" {
+		t.Errorf("daemon-only row daemon_id: want d0, got %q", dv0.DaemonID)
+	}
+	if dv0.Status != "online" {
+		t.Errorf("daemon-only row status: want online, got %q", dv0.Status)
 	}
 }
